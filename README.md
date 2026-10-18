@@ -101,6 +101,9 @@ PAYPAL_BASE_URL="https://api-m.sandbox.paypal.com"
 # Optional: public base URL used for PayPal return/cancel links.
 # Defaults to the origin of the incoming request (e.g. http://localhost:3000).
 # APP_URL="http://localhost:3000"
+
+# Webhook ID from Developer Dashboard → your Sandbox app → Webhooks (required for /api/paypal/webhook)
+PAYPAL_WEBHOOK_ID="your-sandbox-webhook-id"
 ```
 
 PayPal credentials are used **only on the server** (`src/lib/paypal.ts`). No PayPal key is exposed to the browser.
@@ -146,6 +149,7 @@ Open http://localhost:3000.
 | Production server | `npm run start` | Serve the production build |
 | Lint | `npm run lint` | ESLint |
 | Type check | `npx tsc --noEmit` | TypeScript check |
+| Tests | `npm test` | PayPal webhook/capture tests (see [Tests](#tests)) |
 
 ---
 
@@ -177,6 +181,44 @@ Open http://localhost:3000.
 
 Captured payments can be checked in the Sandbox business account at [sandbox.paypal.com](https://www.sandbox.paypal.com/).
 
+### Webhooks
+
+`POST /api/paypal/webhook` confirms payments even if the payer never returns to the app (e.g. closes the tab after approving).
+
+**How it works**
+
+1. Every delivery is verified with PayPal's [verify-webhook-signature](https://developer.paypal.com/docs/api/webhooks/v1/#verify-webhook-signature_post) API using `PAYPAL_WEBHOOK_ID`. Missing headers, malformed bodies, or failed verification → `401`.
+2. The event is used only to find the order ID. The order is re-fetched from PayPal and goes through the same verification as the return flow before the invoice is marked `PAID`.
+3. Handled events:
+   - `CHECKOUT.ORDER.APPROVED` → captures the order server-side, then verifies.
+   - `PAYMENT.CAPTURE.COMPLETED` → verifies the completed capture (including captures that were previously `PENDING`).
+   - `PAYMENT.CAPTURE.PENDING` / `DENIED` / `REFUNDED` / `REVERSED` → logged only; no invoice change.
+   - Any other event type → acknowledged and ignored.
+4. Duplicate deliveries are safe: an already-paid order is acknowledged without changes.
+5. Responses: `200` for processed or intentionally ignored events (including unknown orders and mismatches, which are logged), `5xx` for transient failures so PayPal retries.
+
+**PayPal Dashboard setup (Sandbox)**
+
+1. Expose your app publicly (PayPal cannot reach `localhost`), e.g. with a tunnel such as ngrok, or deploy it.
+2. Go to [developer.paypal.com](https://developer.paypal.com/) → **Apps & Credentials** → **Sandbox** → your app → **Add Webhook**.
+3. Webhook URL: `https://<public-host>/api/paypal/webhook`.
+4. Subscribe to `CHECKOUT.ORDER.APPROVED` and `PAYMENT.CAPTURE.COMPLETED` (optionally `PAYMENT.CAPTURE.PENDING`, `DENIED`, `REFUNDED`, `REVERSED` for logging).
+5. Copy the **Webhook ID** into `.env` as `PAYPAL_WEBHOOK_ID` and restart the server.
+6. Make a Sandbox payment through the public URL and confirm the delivery shows `200` under the app's webhook events.
+
+> The Dashboard's **Webhooks simulator** sends events that do not pass signature verification for your webhook, so they are rejected with `401`. Use real Sandbox payments to test.
+
+### Tests
+
+```bash
+npm test
+```
+
+Uses Node's built-in test runner (no extra dependencies) against the **real MySQL database and PayPal Sandbox** — nothing is mocked. Covers: unsigned/forged/malformed webhook requests rejected with no invoice changes, oversized payloads, duplicate deliveries, re-processing an already-paid order, unapproved orders not being captured, and unknown orders.
+
+- Requires `.env` with `DATABASE_URL` and PayPal Sandbox credentials. If `PAYPAL_WEBHOOK_ID` is unset, a placeholder ID is used (PayPal rejects it, as the invalid-signature tests expect).
+- If a `SENT`/`OVERDUE` invoice exists, setup creates (or reuses) a Sandbox order for it and stores its `paypalOrderId`. Tests never mark invoices `PAID`. Tests needing such data are skipped when it is absent.
+
 ---
 
 ## API Reference
@@ -193,6 +235,7 @@ Captured payments can be checked in the Sandbox business account at [sandbox.pay
 | `POST /api/invoices/[id]/paypal-order` | Create/reuse a PayPal order; returns `{ approveUrl, orderId }` |
 | `GET /api/paypal/return` | PayPal approval return: capture + verify + mark `PAID` |
 | `GET /api/paypal/cancel` | PayPal cancel return: no state change |
+| `POST /api/paypal/webhook` | Signature-verified PayPal webhook: `CHECKOUT.ORDER.APPROVED`, `PAYMENT.CAPTURE.COMPLETED` |
 
 Input validation lives in `src/lib/validation.ts`.
 
@@ -220,7 +263,7 @@ clearcollect/
 │   │       ├── invoices/route.ts
 │   │       ├── invoices/[id]/route.ts
 │   │       ├── invoices/[id]/paypal-order/route.ts
-│   │       └── paypal/{return,cancel}/route.ts
+│   │       └── paypal/{return,cancel,webhook}/route.ts
 │   ├── components/Sidebar.tsx
 │   ├── lib/
 │   │   ├── prisma.ts               # Prisma Client singleton
@@ -236,7 +279,10 @@ clearcollect/
 
 | Limitation | Detail |
 |---|---|
-| **No PayPal webhooks** | Payment is confirmed only when the payer returns to the app. If the payer closes the tab after approving, clicking **Pay with PayPal** again finalizes it. `PENDING` captures are not re-checked automatically. |
+| **Webhooks need a public URL** | PayPal cannot deliver to `localhost`; without a registered webhook, payment is confirmed only when the payer returns to the app. |
+| **Signed webhook paths not auto-tested** | Only PayPal can produce valid signatures, so verified-event handling (ignored types, duplicate signed deliveries, PAID via webhook) must be tested with real Sandbox deliveries. |
+| **No webhook event log** | Idempotency relies on invoice state; individual webhook event IDs are not stored. |
+| **Refunds/reversals not reflected** | `PAYMENT.CAPTURE.REFUNDED`/`REVERSED` webhooks are logged but do not change invoice status. |
 | **Sandbox only** | Tested against PayPal Sandbox; live use requires production credentials, webhooks, and review. |
 | **No authentication** | Anyone with access to the app can view and manage all data. |
 | **No real AI integration** | AI description and follow-up drafting are UI placeholders. |
@@ -267,7 +313,8 @@ clearcollect/
 ### Milestone 4 — PayPal Integration ✅ Sandbox checkout complete
 
 - ✅ Server-side order creation, approval redirect, cancellation, verified capture → `PAID`
-- 🔲 Planned: PayPal webhooks (`PAYMENT.CAPTURE.COMPLETED` etc.), payment links in reminder emails, refunds
+- ✅ Signature-verified webhooks for approved orders and completed captures
+- 🔲 Planned: payment links in reminder emails, refund/reversal handling
 
 ### Milestone 5 — Polish and Deploy 🔲 Planned
 

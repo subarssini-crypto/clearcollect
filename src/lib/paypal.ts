@@ -19,6 +19,7 @@ import {
   CaptureStatus,
   PaypalExperienceUserAction,
   PaypalWalletContextShippingPreference,
+  type OAuthToken,
   type Order,
 } from "@paypal/paypal-server-sdk";
 import { prisma } from "@/lib/prisma";
@@ -32,10 +33,11 @@ const ZERO_DECIMAL_CURRENCIES = new Set(["JPY", "HUF", "TWD"]);
 
 // ── Client ────────────────────────────────────────────────────────────────────
 
+let paypalClient: { client: Client; environment: Environment } | null = null;
 let ordersController: OrdersController | null = null;
 
-function getOrdersController(): OrdersController {
-  if (ordersController) return ordersController;
+function getPaypalClient(): { client: Client; environment: Environment } {
+  if (paypalClient) return paypalClient;
 
   const clientId = process.env.PAYPAL_CLIENT_ID;
   const clientSecret = process.env.PAYPAL_CLIENT_SECRET;
@@ -58,7 +60,12 @@ function getOrdersController(): OrdersController {
     environment,
   });
 
-  ordersController = new OrdersController(client);
+  paypalClient = { client, environment };
+  return paypalClient;
+}
+
+function getOrdersController(): OrdersController {
+  ordersController ??= new OrdersController(getPaypalClient().client);
   return ordersController;
 }
 
@@ -323,6 +330,76 @@ export async function captureOrderForInvoice(orderId: string): Promise<CaptureOu
   }
 
   return { status: "paid", invoiceNumber: invoice.invoiceNumber };
+}
+
+// ── Webhooks ──────────────────────────────────────────────────────────────────
+
+const WEBHOOK_HEADERS = {
+  auth_algo: "paypal-auth-algo",
+  cert_url: "paypal-cert-url",
+  transmission_id: "paypal-transmission-id",
+  transmission_sig: "paypal-transmission-sig",
+  transmission_time: "paypal-transmission-time",
+} as const;
+
+let cachedToken: OAuthToken | undefined;
+
+async function getAccessToken(): Promise<string> {
+  const auth = getPaypalClient().client.clientCredentialsAuthManager;
+  if (!auth.isValid(cachedToken) || auth.isExpired(cachedToken)) {
+    cachedToken = await auth.fetchToken();
+  }
+  return cachedToken.accessToken;
+}
+
+/**
+ * Verifies a webhook delivery with PayPal's verify-webhook-signature API
+ * (the SDK has no webhook controller). The raw body is embedded unmodified
+ * so re-serialization cannot alter the signed payload.
+ * Returns false for missing headers or a failed verification.
+ */
+export async function verifyWebhookSignature(headers: Headers, rawBody: string): Promise<boolean> {
+  const webhookId = process.env.PAYPAL_WEBHOOK_ID;
+  if (!webhookId) throw new PaymentError("PAYPAL_WEBHOOK_ID is not configured", 500);
+
+  // Must be exactly one JSON object, so embedding it below cannot inject fields.
+  try {
+    const parsed: unknown = JSON.parse(rawBody);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return false;
+  } catch {
+    return false;
+  }
+
+  const fields: Record<string, string> = { webhook_id: webhookId };
+  for (const [field, header] of Object.entries(WEBHOOK_HEADERS)) {
+    const value = headers.get(header);
+    if (!value) return false;
+    fields[field] = value;
+  }
+
+  // Use the SDK-selected environment's fixed host so the token is never sent elsewhere.
+  const apiBase =
+    getPaypalClient().environment === Environment.Production
+      ? "https://api-m.paypal.com"
+      : "https://api-m.sandbox.paypal.com";
+
+  const body = `${JSON.stringify(fields).slice(0, -1)},"webhook_event":${rawBody}}`;
+  const response = await fetch(`${apiBase}/v1/notifications/verify-webhook-signature`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${await getAccessToken()}`,
+      "Content-Type": "application/json",
+    },
+    body,
+    cache: "no-store",
+  });
+
+  if (response.status >= 500) {
+    throw new PaymentError(`PayPal verification unavailable (${response.status})`, 502);
+  }
+  if (!response.ok) return false;
+  const result = (await response.json()) as { verification_status?: string };
+  return result.verification_status === "SUCCESS";
 }
 
 /** Converts any thrown error into a safe status + message (no secrets). */
