@@ -126,11 +126,15 @@ const navItems = [
   },
 ];
 
-export default function Sidebar() {
-  const pathname = usePathname();
-  const [mobileOpen, setMobileOpen] = useState(false);
+// NavContent is defined outside Sidebar so it is a stable component reference
+// and does not violate the react-hooks/static-components rule.
+interface NavContentProps {
+  pathname: string;
+  onNavClick: () => void;
+}
 
-  const NavContent = () => (
+function NavContent({ pathname, onNavClick }: NavContentProps) {
+  return (
     <>
       {/* Logo */}
       <div className="flex items-center gap-3 px-6 py-5 border-b border-white/10">
@@ -168,7 +172,7 @@ export default function Sidebar() {
             <Link
               key={item.href}
               href={item.href}
-              onClick={() => setMobileOpen(false)}
+              onClick={onNavClick}
               className={`flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200 group ${
                 isActive
                   ? "bg-blue-500 text-white shadow-lg shadow-blue-500/25"
@@ -207,6 +211,13 @@ export default function Sidebar() {
       </div>
     </>
   );
+}
+
+export default function Sidebar() {
+  const pathname = usePathname();
+  const [mobileOpen, setMobileOpen] = useState(false);
+
+  const closeNav = () => setMobileOpen(false);
 
   return (
     <>
@@ -256,7 +267,7 @@ export default function Sidebar() {
           ${mobileOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"}
         `}
       >
-        <NavContent />
+        <NavContent pathname={pathname} onNavClick={closeNav} />
       </aside>
     </>
   );

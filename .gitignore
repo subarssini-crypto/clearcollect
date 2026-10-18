@@ -57,3 +57,5 @@ vite.config.ts.timestamp-*
 
 # Astro
 .astro/
+
+/src/generated/prisma
