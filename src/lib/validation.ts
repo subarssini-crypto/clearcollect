@@ -91,12 +91,12 @@ const ALLOWED_UPDATE_STATUSES: InvoiceStatus[] = [
   // PAID is intentionally excluded — only the verified PayPal capture may set PAID.
 ];
 
-const VALID_CURRENCIES = new Set([
+export const VALID_CURRENCIES = new Set([
   "USD", "EUR", "GBP", "CAD", "AUD", "INR", "JPY", "SGD", "AED",
 ]);
 
 export interface CreateInvoiceInput {
-  invoiceNumber: string;
+  invoiceNumber: string | null; // null = assign the next INV-YYYY-NNN number on the server
   clientId: number;
   description: string;
   amount: number; // validated positive number; stored as Decimal by Prisma
@@ -117,11 +117,15 @@ export function validateCreateInvoice(
 
   const b = body as Record<string, unknown>;
 
-  // invoiceNumber
+  // invoiceNumber — optional; omitted/blank means auto-assign
   const invoiceNumber = b["invoiceNumber"];
-  if (typeof invoiceNumber !== "string" || invoiceNumber.trim().length === 0) {
-    errors.push({ field: "invoiceNumber", message: "invoiceNumber is required" });
-  } else if (invoiceNumber.trim().length > 191) {
+  const autoNumber =
+    invoiceNumber === undefined ||
+    invoiceNumber === null ||
+    (typeof invoiceNumber === "string" && invoiceNumber.trim().length === 0);
+  if (!autoNumber && typeof invoiceNumber !== "string") {
+    errors.push({ field: "invoiceNumber", message: "invoiceNumber must be a string" });
+  } else if (!autoNumber && (invoiceNumber as string).trim().length > 191) {
     errors.push({ field: "invoiceNumber", message: "invoiceNumber must be 191 characters or fewer" });
   }
 
@@ -187,7 +191,7 @@ export function validateCreateInvoice(
   return {
     ok: true,
     data: {
-      invoiceNumber: (invoiceNumber as string).trim(),
+      invoiceNumber: autoNumber ? null : (invoiceNumber as string).trim(),
       clientId: clientId as number,
       description: (description as string).trim(),
       amount: amount as number,

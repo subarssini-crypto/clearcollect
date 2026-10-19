@@ -10,6 +10,7 @@
     "test": "node --env-file=.env --experimental-transform-types --no-warnings --import ./tests/register.mjs --test tests/*.test.ts"
   },
   "dependencies": {
+    "@google/genai": "^2.30.0",
     "@paypal/paypal-server-sdk": "^2.5.0",
     "@prisma/client": "^6.19.3",
     "next": "16.4.2",

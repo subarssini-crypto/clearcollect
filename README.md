@@ -2,7 +2,7 @@
 
 **AI-assisted invoicing and payment follow-up for freelancers and small businesses.**
 
-> Built for the [PayPal AI Hackathon](https://developer.paypal.com/). ClearCollect now stores clients and invoices in **MySQL via Prisma** and accepts invoice payments through **PayPal Sandbox Checkout** (Orders v2, server-side). AI features, email sending, and authentication are still **planned**.
+> Built for the [PayPal AI Hackathon](https://developer.paypal.com/). ClearCollect now stores clients and invoices in **MySQL via Prisma** and accepts invoice payments through **PayPal Sandbox Checkout** (Orders v2, server-side). An **AI invoice generator** (Google Gemini) drafts invoices from plain-language descriptions for review. AI follow-ups, email sending, and authentication are still **planned**.
 
 ---
 
@@ -39,11 +39,11 @@ Freelancers and small business owners spend significant time chasing unpaid invo
 |---|---|---|
 | **Dashboard** | ✅ Implemented | Summary cards and recent invoices, loaded from MySQL |
 | **Invoices List** | ✅ Implemented | Invoices from MySQL with status filter tabs (All / Paid / Pending / Overdue / Draft) and a **Pay with PayPal** button on payable invoices |
-| **Create Invoice** | ✅ Implemented | Saves invoices to MySQL for an existing client (DRAFT or SENT). Line items are currently a fixed sample list combined into the invoice description |
+| **Create Invoice** | ✅ Implemented | Saves invoices to MySQL as DRAFT for an existing client, with editable line items and currency. Line items are combined into the invoice description |
 | **Client Management** | ✅ Implemented | Client grid with totals from MySQL; add new clients |
 | **PayPal Sandbox Checkout** | ✅ Implemented | Server-side order creation, approval redirect, cancellation, and verified server-side capture that marks the invoice **PAID** |
 | **Follow-up Assistant** | 🔲 Planned (UI only) | Page uses sample demo data; no AI drafting or email sending |
-| **AI invoice description** | 🔲 Planned (UI only) | Input and button are present but disabled |
+| **AI Invoice Generator** | ✅ Implemented | Gemini turns a plain-language request into an editable draft (client, currency, dates, line items); nothing is saved until you click Save Draft |
 | **Settings** | 🔲 Planned (UI only) | Preferences are not persisted; the "Connect PayPal" button is a disabled placeholder |
 | **Responsive Sidebar** | ✅ Implemented | Active route highlighting and mobile menu |
 
@@ -59,6 +59,7 @@ Freelancers and small business owners spend significant time chasing unpaid invo
 | Database | MySQL | 8.x recommended |
 | ORM | [Prisma](https://www.prisma.io/) (`prisma-client` generator) | 6.19.3 |
 | Payments | [`@paypal/paypal-server-sdk`](https://www.npmjs.com/package/@paypal/paypal-server-sdk) (Orders v2) | 2.5.0 |
+| AI | [`@google/genai`](https://www.npmjs.com/package/@google/genai) (model `gemini-3.5-flash-lite`) | ^2.30.0 |
 | Linting | ESLint + eslint-config-next | ^9 / 16.4.2 |
 
 ---
@@ -83,7 +84,7 @@ npm install
 
 ## Environment Variables
 
-Create a `.env` file in the project root (used by both Next.js and the Prisma CLI). `.env*` files are ignored by Git — **never commit them**.
+Copy `.env.example` to `.env` in the project root (used by both Next.js and the Prisma CLI) and fill in your values. `.env` is ignored by Git — **never commit it**.
 
 ```bash
 # .env — DO NOT COMMIT
@@ -104,9 +105,29 @@ PAYPAL_BASE_URL="https://api-m.sandbox.paypal.com"
 
 # Webhook ID from Developer Dashboard → your Sandbox app → Webhooks (required for /api/paypal/webhook)
 PAYPAL_WEBHOOK_ID="your-sandbox-webhook-id"
+
+# Google Gemini API key for the AI invoice generator
+GEMINI_API_KEY="your-gemini-api-key"
 ```
 
-PayPal credentials are used **only on the server** (`src/lib/paypal.ts`). No PayPal key is exposed to the browser.
+PayPal credentials and the Gemini key are used **only on the server** (`src/lib/paypal.ts`, `src/lib/ai-invoice.ts`). No key is exposed to the browser.
+
+---
+
+## AI Invoice Generator
+
+On **/create-invoice**, describe the work (e.g. *"12 hours of UX research for Acme at $85/hr, due in 30 days"*) and click **Generate with AI**.
+
+1. The browser sends only the text to `POST /api/ai/invoice-draft` (max 2,000 characters).
+2. The server sends the request, today's date, and the client list (id, name, company) to Gemini (`gemini-3.5-flash-lite`, structured JSON output).
+3. The response is strictly validated in `src/lib/invoice-draft.ts`: only client, currency, dates, line items, and assumptions are accepted (any status, payment, or amount field is rejected); unknown clients become unselected; line amounts and the total are recomputed in cents; the result must pass the same rules as `POST /api/invoices`.
+4. The form is filled in for review. You can edit everything; **nothing is saved** until you click **Save Draft**, which creates a `DRAFT` invoice through the normal invoice API. The AI cannot set `PAID` or touch PayPal.
+
+**Setup:** create a key at [Google AI Studio](https://aistudio.google.com/) → **Get API key**, add it to `.env` as `GEMINI_API_KEY`, and restart the server. Without it the endpoint returns `503` and the form still works manually. Free-tier rate limits apply; a `429` response means the quota is exhausted for now.
+
+### Invoice numbers
+
+Leave **Invoice Number** blank and the server assigns the next number in `INV-YYYY-NNN` format (year of the issue date, e.g. `INV-2026-007`); the assigned number is shown after saving. If two invoices are saved at the same moment and pick the same number, the database's unique constraint rejects one and it is safely retried with the next number — existing invoices are never changed. You can still type a custom invoice number; if it is already in use, the save is rejected with "An invoice with this number already exists".
 
 ---
 
@@ -149,7 +170,7 @@ Open http://localhost:3000.
 | Production server | `npm run start` | Serve the production build |
 | Lint | `npm run lint` | ESLint |
 | Type check | `npx tsc --noEmit` | TypeScript check |
-| Tests | `npm test` | PayPal webhook/capture tests (see [Tests](#tests)) |
+| Tests | `npm test` | PayPal webhook/capture and AI draft tests (see [Tests](#tests)) |
 
 ---
 
@@ -216,6 +237,8 @@ npm test
 
 Uses Node's built-in test runner (no extra dependencies) against the **real MySQL database and PayPal Sandbox** — nothing is mocked. Covers: unsigned/forged/malformed webhook requests rejected with no invoice changes, oversized payloads, duplicate deliveries, re-processing an already-paid order, unapproved orders not being captured, and unknown orders.
 
+AI invoice draft tests (`tests/invoice-draft.test.ts`) are fully **offline** — no Gemini calls, no database writes. They cover strict draft validation, recomputed totals, rejected status/payment fields, and the endpoint's input and missing-key guards.
+
 - Requires `.env` with `DATABASE_URL` and PayPal Sandbox credentials. If `PAYPAL_WEBHOOK_ID` is unset, a placeholder ID is used (PayPal rejects it, as the invalid-signature tests expect).
 - If a `SENT`/`OVERDUE` invoice exists, setup creates (or reuses) a Sandbox order for it and stores its `paypalOrderId`. Tests never mark invoices `PAID`. Tests needing such data are skipped when it is absent.
 
@@ -228,13 +251,14 @@ Uses Node's built-in test runner (no extra dependencies) against the **real MySQ
 | `GET /api/clients` | List clients with invoice counts |
 | `POST /api/clients` | Create a client |
 | `GET /api/invoices` | List invoices (`?status=`, `?clientId=`, `?page=`, `?limit=` ≤ 100) |
-| `POST /api/invoices` | Create an invoice (status `DRAFT` or `SENT` only) |
+| `POST /api/invoices` | Create an invoice (status `DRAFT` or `SENT` only; omit `invoiceNumber` to auto-assign `INV-YYYY-NNN`) |
 | `GET /api/invoices/[id]` | Get one invoice |
 | `PATCH /api/invoices/[id]` | Update description, amount, currency, due date, or status (not `PAID`) |
 | `DELETE /api/invoices/[id]` | Delete a `DRAFT` or `CANCELLED` invoice |
 | `POST /api/invoices/[id]/paypal-order` | Create/reuse a PayPal order; returns `{ approveUrl, orderId }` |
 | `GET /api/paypal/return` | PayPal approval return: capture + verify + mark `PAID` |
 | `GET /api/paypal/cancel` | PayPal cancel return: no state change |
+| `POST /api/ai/invoice-draft` | Generate an invoice draft from `{ request }` for review; never saves |
 | `POST /api/paypal/webhook` | Signature-verified PayPal webhook: `CHECKOUT.ORDER.APPROVED`, `PAYMENT.CAPTURE.COMPLETED` |
 
 Input validation lives in `src/lib/validation.ts`.
@@ -254,7 +278,7 @@ clearcollect/
 │   │   ├── layout.tsx              # Root layout with Sidebar
 │   │   ├── page.tsx                # / — Dashboard (MySQL data)
 │   │   ├── invoices/page.tsx       # /invoices — list, filters, Pay with PayPal
-│   │   ├── create-invoice/page.tsx # /create-invoice — saves to MySQL
+│   │   ├── create-invoice/page.tsx # /create-invoice — AI draft + review, saves to MySQL
 │   │   ├── clients/page.tsx        # /clients — client grid, add client
 │   │   ├── follow-ups/page.tsx     # /follow-ups — sample data (planned)
 │   │   ├── settings/page.tsx       # /settings — UI only (planned)
@@ -285,9 +309,9 @@ clearcollect/
 | **Refunds/reversals not reflected** | `PAYMENT.CAPTURE.REFUNDED`/`REVERSED` webhooks are logged but do not change invoice status. |
 | **Sandbox only** | Tested against PayPal Sandbox; live use requires production credentials, webhooks, and review. |
 | **No authentication** | Anyone with access to the app can view and manage all data. |
-| **No real AI integration** | AI description and follow-up drafting are UI placeholders. |
+| **AI follow-ups not implemented** | Follow-up reminder drafting is a UI placeholder. AI invoice drafts depend on Gemini free-tier limits and should always be reviewed. |
 | **No email sending** | Send buttons are demo-only. |
-| **Line items not stored** | Create Invoice uses a fixed sample line-item list; only the total and a combined description are saved. |
+| **Line items not stored separately** | Line items are editable in the form, but only the total and a combined description are saved. |
 | **Settings not persisted** | Settings page is UI only. |
 | **Currency support** | `INR` and some other currencies may be rejected depending on the PayPal merchant account. |
 
@@ -304,11 +328,11 @@ clearcollect/
 - ✅ Dashboard, invoices, clients, and create-invoice pages use real data
 - 🔲 Planned: line items model, user authentication, persisted settings
 
-### Milestone 3 — AI Integration 🔲 Planned
+### Milestone 3 — AI Integration 🟡 In progress
 
-- Parse free-text descriptions into invoice fields
-- Draft contextual payment reminders; user reviews before sending
-- Email delivery
+- ✅ Parse free-text descriptions into an editable invoice draft (Gemini)
+- 🔲 Planned: draft contextual payment reminders; user reviews before sending
+- 🔲 Planned: email delivery
 
 ### Milestone 4 — PayPal Integration ✅ Sandbox checkout complete
 

@@ -1,6 +1,7 @@
 /**
  * GET  /api/invoices        — list invoices (with optional ?status= and ?clientId= filters)
- * POST /api/invoices        — create a new invoice
+ * POST /api/invoices        — create a new invoice (invoiceNumber optional: omitted/blank
+ *                               assigns the next INV-YYYY-NNN number for the issue year)
  *
  * Security note: PAID status cannot be set via this endpoint.
  * Invoice status may only be set to PAID by a verified payment webhook.
@@ -14,6 +15,11 @@ import {
   validationErrorResponse,
   serverErrorResponse,
 } from "@/lib/validation";
+import {
+  InvoiceNumberExhaustedError,
+  createWithInvoiceNumber,
+  isInvoiceNumberConflict,
+} from "@/lib/invoice-number";
 
 const VALID_STATUSES = new Set(Object.values(InvoiceStatus));
 
@@ -99,7 +105,7 @@ export async function POST(request: Request): Promise<Response> {
   const result = validateCreateInvoice(body);
   if (!result.ok) return validationErrorResponse(result.errors);
 
-  const { amount, ...rest } = result.data;
+  const { amount, invoiceNumber, ...rest } = result.data;
 
   try {
     // Verify the referenced client exists before creating the invoice
@@ -114,25 +120,32 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
-    const invoice = await prisma.invoice.create({
-      data: {
-        ...rest,
-        // Convert to string for Prisma's Decimal field — avoids floating point drift
-        amount: amount.toFixed(2),
-      },
-      include: {
-        client: { select: { id: true, name: true, email: true } },
-      },
-    });
+    const create = (number: string) =>
+      prisma.invoice.create({
+        data: {
+          ...rest,
+          invoiceNumber: number,
+          // Convert to string for Prisma's Decimal field — avoids floating point drift
+          amount: amount.toFixed(2),
+        },
+        include: {
+          client: { select: { id: true, name: true, email: true } },
+        },
+      });
+
+    const invoice = invoiceNumber
+      ? await create(invoiceNumber)
+      : await createWithInvoiceNumber(rest.issueDate.getUTCFullYear(), create);
     return Response.json({ ok: true, data: invoice }, { status: 201 });
   } catch (err: unknown) {
-    // Unique constraint on invoiceNumber
-    if (
-      typeof err === "object" &&
-      err !== null &&
-      "code" in err &&
-      (err as { code: string }).code === "P2002"
-    ) {
+    if (err instanceof InvoiceNumberExhaustedError) {
+      return Response.json(
+        { ok: false, errors: [{ field: "invoiceNumber", message: err.message }] },
+        { status: 409 }
+      );
+    }
+    // Unique constraint on a user-supplied invoiceNumber
+    if (isInvoiceNumberConflict(err)) {
       return Response.json(
         {
           ok: false,

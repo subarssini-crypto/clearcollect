@@ -1,7 +1,8 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
+import { VALID_CURRENCIES } from "@/lib/validation";
 
 type Client = {
   id: number;
@@ -17,22 +18,55 @@ type ApiResponse<T> = {
   errors?: { field: string; message: string }[];
 };
 
-const sampleLineItems = [
+type LineItem = {
+  id: number;
+  description: string;
+  quantity: number;
+  rate: number;
+};
+
+type InvoiceDraft = {
+  clientId: number | null;
+  currency: string;
+  issueDate: string;
+  dueDate: string;
+  lineItems: { description: string; quantity: number; rate: number }[];
+  assumptions: string[];
+};
+
+const sampleLineItems: LineItem[] = [
   {
     id: 1,
     description: "Web Design — 10 hours @ $95/hr",
     quantity: 10,
     rate: 95,
-    amount: 950,
   },
   {
     id: 2,
     description: "Frontend Development — 8 hours @ $110/hr",
     quantity: 8,
     rate: 110,
-    amount: 880,
   },
 ];
+
+const currencies = [...VALID_CURRENCIES];
+
+// Today's local date is read only in the browser. The server snapshot is
+// empty, so prerendering never reads the clock and hydration always matches.
+const subscribeNoop = () => () => {};
+const getLocalToday = () => new Date().toLocaleDateString("en-CA");
+const getServerToday = () => "";
+
+function addDays(isoDate: string, days: number) {
+  const date = new Date(`${isoDate}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+/** Line amount in integer cents (same rounding as the server). */
+function lineCents(item: LineItem) {
+  return Math.round((Math.round(item.quantity * 100) * Math.round(item.rate * 100)) / 100);
+}
 
 const sampleReminder = `Subject: Friendly Payment Reminder
 
@@ -51,31 +85,89 @@ Your Business`;
 
 export default function CreateInvoicePage() {
   const [clientRequest, setClientRequest] = useState("");
-  const [invoiceNumber, setInvoiceNumber] = useState("INV-2026-006");
+  // Blank = the server assigns the next unique INV-YYYY-NNN number on save.
+  const [invoiceNumber, setInvoiceNumber] = useState("");
   const [clientName, setClientName] = useState("");
   const [clientEmail, setClientEmail] = useState("");
   const [clients, setClients] = useState<Client[]>([]);
   const [clientId, setClientId] = useState("");
   const [clientsLoading, setClientsLoading] = useState(true);
-  const [issueDate, setIssueDate] = useState(
-    new Date().toLocaleDateString("en-CA")
-  );
-  const [dueDate, setDueDate] = useState(() => {
-    const date = new Date();
-    date.setDate(date.getDate() + 14);
-    return date.toLocaleDateString("en-CA");
-  });
-  const [lineItems] = useState(sampleLineItems);
+  // Dates default to today / today + 14 days until the user (or AI draft) sets them.
+  const today = useSyncExternalStore(subscribeNoop, getLocalToday, getServerToday);
+  const [issueDateInput, setIssueDate] = useState<string | null>(null);
+  const [dueDateInput, setDueDate] = useState<string | null>(null);
+  const issueDate = issueDateInput ?? today;
+  const dueDate = dueDateInput ?? (today ? addDays(today, 14) : "");
+  const [lineItems, setLineItems] = useState<LineItem[]>(sampleLineItems);
+  const [currency, setCurrency] = useState("USD");
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [aiMessage, setAiMessage] = useState("");
+  const [aiError, setAiError] = useState(false);
+  const [assumptions, setAssumptions] = useState<string[]>([]);
   const [reminderText, setReminderText] = useState(sampleReminder);
   const [reminderSent, setReminderSent] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState("");
   const [saveError, setSaveError] = useState(false);
 
-  const subtotal = lineItems.reduce(
-    (sum, item) => sum + item.amount,
-    0
-  );
+  const subtotal =
+    lineItems.reduce((sum, item) => sum + lineCents(item), 0) / 100;
+
+  function formatMoney(value: number) {
+    return new Intl.NumberFormat("en-US", { style: "currency", currency }).format(value);
+  }
+
+  function updateLineItem(id: number, changes: Partial<LineItem>) {
+    setLineItems((items) =>
+      items.map((item) => (item.id === id ? { ...item, ...changes } : item))
+    );
+  }
+
+  function addLineItem() {
+    setLineItems((items) => [
+      ...items,
+      { id: Math.max(0, ...items.map((i) => i.id)) + 1, description: "", quantity: 1, rate: 0 },
+    ]);
+  }
+
+  // Fills the form with an AI draft for review. Never saves.
+  async function handleGenerate() {
+    if (!clientRequest.trim() || isGenerating) return;
+    setIsGenerating(true);
+    setAiMessage("");
+    setAiError(false);
+    setAssumptions([]);
+
+    try {
+      const response = await fetch("/api/ai/invoice-draft", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ request: clientRequest }),
+      });
+      const result: ApiResponse<InvoiceDraft> = await response.json();
+      if (!response.ok || !result.ok || !result.data) {
+        throw new Error(
+          result.errors?.map((e) => e.message).join(" ") ||
+            result.error ||
+            "Could not generate a draft."
+        );
+      }
+
+      const draft = result.data;
+      setLineItems(draft.lineItems.map((item, index) => ({ id: index + 1, ...item })));
+      setCurrency(draft.currency);
+      setIssueDate(draft.issueDate);
+      setDueDate(draft.dueDate);
+      if (draft.clientId !== null) handleClientChange(String(draft.clientId));
+      setAssumptions(draft.assumptions);
+      setAiMessage("Draft generated. Review and edit the details below — nothing has been saved yet.");
+    } catch (err) {
+      setAiError(true);
+      setAiMessage(err instanceof Error ? err.message : "Could not generate a draft.");
+    } finally {
+      setIsGenerating(false);
+    }
+  }
 
   useEffect(() => {
     async function loadClients() {
@@ -122,12 +214,6 @@ export default function CreateInvoicePage() {
     setSaveMessage("");
     setSaveError(false);
 
-    if (!invoiceNumber.trim()) {
-      setSaveError(true);
-      setSaveMessage("Please enter an invoice number.");
-      return;
-    }
-
     if (!clientId) {
       setSaveError(true);
       setSaveMessage("Please select a client.");
@@ -137,6 +223,15 @@ export default function CreateInvoicePage() {
     if (!issueDate || !dueDate || dueDate <= issueDate) {
       setSaveError(true);
       setSaveMessage("Due date must be after the issue date.");
+      return;
+    }
+
+    if (
+      lineItems.length === 0 ||
+      lineItems.some((item) => !item.description.trim() || !(item.quantity > 0) || !(item.rate > 0))
+    ) {
+      setSaveError(true);
+      setSaveMessage("Each line item needs a description, a quantity above 0, and a rate above 0.");
       return;
     }
 
@@ -151,20 +246,20 @@ export default function CreateInvoicePage() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          invoiceNumber: invoiceNumber.trim(),
+          ...(invoiceNumber.trim() ? { invoiceNumber: invoiceNumber.trim() } : {}),
           clientId: Number(clientId),
           description: lineItems
-            .map((item) => item.description)
+            .map((item) => item.description.trim())
             .join("; "),
           amount: subtotal,
-          currency: "USD",
+          currency,
           issueDate,
           dueDate,
           status: "DRAFT",
         }),
       });
 
-      const result: ApiResponse<unknown> = await response.json();
+      const result: ApiResponse<{ invoiceNumber: string }> = await response.json();
 
       if (!response.ok || !result.ok) {
         const message =
@@ -175,7 +270,13 @@ export default function CreateInvoicePage() {
         throw new Error(message);
       }
 
-      setSaveMessage("Draft saved successfully to the database!");
+      setSaveMessage(
+        result.data?.invoiceNumber
+          ? `Draft ${result.data.invoiceNumber} saved successfully to the database!`
+          : "Draft saved successfully to the database!"
+      );
+      // Leave the field blank so the next save gets a fresh number.
+      setInvoiceNumber("");
     } catch (error) {
       setSaveError(true);
       setSaveMessage(
@@ -211,7 +312,7 @@ export default function CreateInvoicePage() {
         <p className="text-slate-500 text-sm mt-1">
           Create an invoice for your client and save it to your database.
           <span className="text-amber-600 font-medium ml-1">
-            AI generation, email and payment integrations are not connected yet.
+            Email sending is not connected yet.
           </span>
         </p>
       </div>
@@ -239,19 +340,20 @@ export default function CreateInvoicePage() {
                 AI Invoice Generator
               </h2>
               <span className="ml-auto text-xs bg-violet-100 text-violet-600 font-medium px-2 py-0.5 rounded-full">
-                Coming Soon
+                Review before saving
               </span>
             </div>
 
             <p className="text-slate-500 text-sm mb-3">
-              Describe your project. AI-assisted invoice generation will be
-              added later.
+              Describe the work. AI fills in a draft below for you to review —
+              it never saves or sends anything.
             </p>
 
             <textarea
               id="client-request-textarea"
               value={clientRequest}
               onChange={(e) => setClientRequest(e.target.value)}
+              maxLength={2000}
               placeholder="e.g. I completed 10 hours of web design and 8 hours of frontend development..."
               rows={4}
               className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none transition"
@@ -259,11 +361,32 @@ export default function CreateInvoicePage() {
 
             <button
               id="generate-invoice-btn"
-              disabled
-              className="mt-3 flex items-center gap-2 bg-violet-600 text-white text-sm font-medium px-4 py-2 rounded-lg opacity-50 cursor-not-allowed"
+              onClick={handleGenerate}
+              disabled={isGenerating || !clientRequest.trim()}
+              className="mt-3 flex items-center gap-2 bg-violet-600 hover:bg-violet-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              Generate with AI (coming soon)
+              {isGenerating ? "Generating draft..." : "Generate with AI"}
             </button>
+
+            {aiMessage && (
+              <div
+                role="status"
+                aria-live="polite"
+                className={`mt-3 rounded-xl px-4 py-3 text-sm ${aiError
+                    ? "bg-red-50 text-red-700 ring-1 ring-red-200"
+                    : "bg-violet-50 text-violet-700 ring-1 ring-violet-200"
+                  }`}
+              >
+                {aiMessage}
+                {assumptions.length > 0 && (
+                  <ul className="mt-2 list-disc pl-5 space-y-0.5">
+                    {assumptions.map((note, index) => (
+                      <li key={index}>{note}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="bg-white rounded-2xl ring-1 ring-slate-200 p-6">
@@ -283,6 +406,7 @@ export default function CreateInvoicePage() {
                   id="invoice-number"
                   type="text"
                   value={invoiceNumber}
+                  placeholder="Auto-assigned on save"
                   onChange={(e) => setInvoiceNumber(e.target.value)}
                   className={inputClass}
                 />
@@ -350,7 +474,7 @@ export default function CreateInvoicePage() {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3 sm:col-span-2">
+              <div className="grid grid-cols-3 gap-3 sm:col-span-2">
                 <div>
                   <label
                     htmlFor="issue-date"
@@ -383,6 +507,27 @@ export default function CreateInvoicePage() {
                     className={inputClass}
                   />
                 </div>
+
+                <div>
+                  <label
+                    htmlFor="currency"
+                    className="block text-xs font-medium text-slate-500 mb-1.5"
+                  >
+                    Currency
+                  </label>
+                  <select
+                    id="currency"
+                    value={currency}
+                    onChange={(e) => setCurrency(e.target.value)}
+                    className={inputClass}
+                  >
+                    {currencies.map((code) => (
+                      <option key={code} value={code}>
+                        {code}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
             </div>
 
@@ -393,31 +538,64 @@ export default function CreateInvoicePage() {
                     <th className="text-left px-4 py-3 font-medium text-slate-500">
                       Description
                     </th>
-                    <th className="text-right px-4 py-3 font-medium text-slate-500 w-16">
+                    <th className="text-right px-4 py-3 font-medium text-slate-500 w-20">
                       Qty
                     </th>
-                    <th className="text-right px-4 py-3 font-medium text-slate-500 w-24 hidden sm:table-cell">
+                    <th className="text-right px-4 py-3 font-medium text-slate-500 w-28">
                       Rate
                     </th>
-                    <th className="text-right px-4 py-3 font-medium text-slate-500 w-24">
+                    <th className="text-right px-4 py-3 font-medium text-slate-500 w-28">
                       Amount
                     </th>
+                    <th className="w-10" />
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {lineItems.map((item) => (
                     <tr key={item.id}>
-                      <td className="px-4 py-3 text-slate-700">
-                        {item.description}
+                      <td className="px-2 py-2">
+                        <input
+                          aria-label="Line item description"
+                          value={item.description}
+                          maxLength={200}
+                          onChange={(e) => updateLineItem(item.id, { description: e.target.value })}
+                          className="w-full rounded-lg px-2 py-1.5 text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
                       </td>
-                      <td className="px-4 py-3 text-right text-slate-600">
-                        {item.quantity}
+                      <td className="px-2 py-2">
+                        <input
+                          aria-label="Quantity"
+                          type="number"
+                          min={0}
+                          step="0.01"
+                          value={item.quantity}
+                          onChange={(e) => updateLineItem(item.id, { quantity: Number(e.target.value) || 0 })}
+                          className="w-full rounded-lg px-2 py-1.5 text-right text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
                       </td>
-                      <td className="px-4 py-3 text-right text-slate-600 hidden sm:table-cell">
-                        ${item.rate.toLocaleString()}
+                      <td className="px-2 py-2">
+                        <input
+                          aria-label="Rate"
+                          type="number"
+                          min={0}
+                          step="0.01"
+                          value={item.rate}
+                          onChange={(e) => updateLineItem(item.id, { rate: Number(e.target.value) || 0 })}
+                          className="w-full rounded-lg px-2 py-1.5 text-right text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
                       </td>
-                      <td className="px-4 py-3 text-right font-medium text-slate-900">
-                        ${item.amount.toLocaleString()}
+                      <td className="px-4 py-3 text-right font-medium text-slate-900 whitespace-nowrap">
+                        {formatMoney(lineCents(item) / 100)}
+                      </td>
+                      <td className="px-2 py-2 text-center">
+                        <button
+                          type="button"
+                          aria-label="Remove line item"
+                          onClick={() => setLineItems((items) => items.filter((i) => i.id !== item.id))}
+                          className="rounded-lg px-2 py-1 text-slate-400 hover:bg-slate-100 hover:text-red-600"
+                        >
+                          ×
+                        </button>
                       </td>
                     </tr>
                   ))}
@@ -425,15 +603,22 @@ export default function CreateInvoicePage() {
               </table>
             </div>
 
-            <div className="flex justify-end">
+            <div className="flex justify-between items-start gap-4">
+              <button
+                type="button"
+                onClick={addLineItem}
+                className="text-sm font-medium text-blue-600 hover:text-blue-700"
+              >
+                + Add line item
+              </button>
               <div className="w-64 space-y-2 text-sm">
                 <div className="flex justify-between text-slate-500">
                   <span>Subtotal</span>
-                  <span>${subtotal.toLocaleString()}</span>
+                  <span>{formatMoney(subtotal)}</span>
                 </div>
                 <div className="flex justify-between font-bold text-slate-900 text-base pt-2 border-t border-slate-200">
                   <span>Total</span>
-                  <span>${subtotal.toLocaleString()}</span>
+                  <span>{formatMoney(subtotal)}</span>
                 </div>
                 <p className="text-xs text-slate-400">
                   Tax is not included in this draft.
