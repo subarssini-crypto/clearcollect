@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 
 type Invoice = {
   id: number;
+  paypalCaptureId?: string | null;
   invoiceNumber: string;
   clientId: number;
   description: string;
@@ -31,7 +32,7 @@ type ApiResponse = {
 const paymentMessages: Record<string, { text: string; style: string }> = {
   paid: { text: "Payment received — invoice marked as paid.", style: "bg-emerald-50 text-emerald-700 ring-emerald-200" },
   pending: { text: "PayPal is still processing this payment. The invoice stays unpaid until it completes.", style: "bg-amber-50 text-amber-700 ring-amber-200" },
-  cancelled: { text: "PayPal payment was cancelled. No changes were made.", style: "bg-slate-50 text-slate-600 ring-slate-200" },
+  cancelled: { text: "PayPal payment was cancelled. No changes were made.", style: "bg-canvas text-slate-600 ring-line" },
   error: { text: "The PayPal payment could not be completed. The invoice was not marked as paid.", style: "bg-red-50 text-red-700 ring-red-200" },
 };
 
@@ -175,15 +176,51 @@ export default function InvoicesPage() {
     return getDisplayStatus(invoice) === activeTab;
   });
 
+  // Payment column: Pay button for payable invoices, a PayPal badge when a
+  // capture is recorded, otherwise a neutral dash (no payment data is invented).
+  function renderPayment(invoice: Invoice) {
+    return (
+      <>
+                        {(invoice.status === "SENT" || invoice.status === "OVERDUE") && (
+                          <button
+                            id={`pay-paypal-${invoice.id}`}
+                            onClick={() => payWithPaypal(invoice)}
+                            disabled={payingId !== null}
+                            className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-brand hover:bg-brand-dark text-white transition-colors disabled:opacity-50"
+                          >
+                            {payingId === invoice.id ? "Redirecting..." : "Pay with PayPal"}
+                          </button>
+                        )}
+                        {invoice.status === "PAID" && invoice.paypalCaptureId && (
+                          <span
+                            title={`Paid via PayPal (capture ...${invoice.paypalCaptureId.slice(-6)})`}
+                            className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700"
+                          >
+                            <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3} aria-hidden="true">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                            </svg>
+                            PayPal
+                          </span>
+                        )}
+                        {!(invoice.status === "SENT" || invoice.status === "OVERDUE") &&
+                          !(invoice.status === "PAID" && invoice.paypalCaptureId) && (
+                            <span className="text-muted" aria-label="No payment method recorded">
+                              —
+                            </span>
+                          )}
+                      </>
+    );
+  }
+
   return (
-    <div className="min-h-full p-6 lg:p-8">
+    <div className="mx-auto w-full max-w-[1440px] px-4 py-5 sm:px-6 lg:px-8">
       {/* Header */}
-      <div className="mb-6 flex items-center justify-between gap-4">
+      <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">
+          <h1 className="text-xl font-bold tracking-tight text-navy">
             Invoices
           </h1>
-          <p className="text-slate-500 text-sm mt-1">
+          <p className="text-muted text-[13px] mt-0.5">
             Manage your invoices stored in the database.
           </p>
         </div>
@@ -191,7 +228,7 @@ export default function InvoicesPage() {
         <Link
           href="/create-invoice"
           id="invoices-create-btn"
-          className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2.5 rounded-xl transition-colors shadow-sm shadow-blue-200 whitespace-nowrap"
+          className="flex items-center gap-2 bg-brand hover:bg-brand-dark text-white text-[13px] font-semibold px-3.5 py-2 rounded-lg transition-colors whitespace-nowrap"
         >
           <svg
             className="w-4 h-4"
@@ -214,7 +251,7 @@ export default function InvoicesPage() {
       {(payment || payError) && (
         <div
           role="status"
-          className={`mb-5 rounded-2xl ring-1 p-4 text-sm ${payError ? paymentMessages.error.style : paymentMessages[payment!.result].style}`}
+          className={`mb-4 rounded-lg ring-1 p-4 text-sm ${payError ? paymentMessages.error.style : paymentMessages[payment!.result].style}`}
         >
           {payError || (
             <>
@@ -226,7 +263,7 @@ export default function InvoicesPage() {
       )}
 
       {/* Filter tabs */}
-      <div className="flex flex-wrap gap-1 mb-5 bg-slate-100 p-1 rounded-xl w-fit">
+      <div className="flex flex-wrap gap-1 mb-4 bg-slate-100 p-1 rounded-lg w-fit">
         {tabs.map((tab) => (
           <button
             key={tab}
@@ -234,8 +271,8 @@ export default function InvoicesPage() {
             onClick={() => setActiveTab(tab)}
             aria-pressed={activeTab === tab}
             className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${activeTab === tab
-                ? "bg-white text-slate-900 shadow-sm"
-                : "text-slate-500 hover:text-slate-700"
+                ? "bg-white text-navy shadow-sm"
+                : "text-muted hover:text-slate-700"
               }`}
           >
             {tab}
@@ -245,7 +282,7 @@ export default function InvoicesPage() {
 
       {/* Loading state */}
       {isLoading && (
-        <div className="bg-white rounded-2xl ring-1 ring-slate-200 p-10 text-center text-sm text-slate-500">
+        <div className="card p-10 text-center text-[13px] text-muted">
           Loading invoices from the database...
         </div>
       )}
@@ -254,7 +291,7 @@ export default function InvoicesPage() {
       {!isLoading && error && (
         <div
           role="alert"
-          className="bg-red-50 text-red-700 ring-1 ring-red-200 rounded-2xl p-5"
+          className="bg-red-50 text-red-700 ring-1 ring-red-200 rounded-lg p-5"
         >
           <p className="font-semibold">Could not load invoices</p>
           <p className="text-sm mt-1">{error}</p>
@@ -269,63 +306,63 @@ export default function InvoicesPage() {
 
       {/* Invoice table */}
       {!isLoading && !error && (
-        <div className="bg-white rounded-2xl ring-1 ring-slate-200 overflow-hidden">
+        <div className="card overflow-hidden">
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="w-full text-[13px]">
               <thead>
-                <tr className="bg-slate-50 border-b border-slate-100">
-                  <th className="text-left px-6 py-3 font-medium text-slate-500">
+                <tr className="bg-canvas border-b border-line">
+                  <th className="text-left px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted">
                     Invoice
                   </th>
-                  <th className="text-left px-4 py-3 font-medium text-slate-500">
+                  <th className="text-left px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted">
                     Client
                   </th>
-                  <th className="text-left px-4 py-3 font-medium text-slate-500">
+                  <th className="text-left px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted">
                     Amount
                   </th>
-                  <th className="text-left px-4 py-3 font-medium text-slate-500 hidden md:table-cell">
+                  <th className="text-left px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted hidden md:table-cell">
                     Issued
                   </th>
-                  <th className="text-left px-4 py-3 font-medium text-slate-500">
+                  <th className="text-left px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted hidden sm:table-cell">
                     Due Date
                   </th>
-                  <th className="text-left px-4 py-3 font-medium text-slate-500">
+                  <th className="text-left px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted">
                     Status
                   </th>
-                  <th className="text-right px-6 py-3 font-medium text-slate-500">
+                  <th className="text-right px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted hidden sm:table-cell">
                     Payment
                   </th>
                 </tr>
               </thead>
 
-              <tbody className="divide-y divide-slate-50">
+              <tbody className="divide-y divide-line">
                 {filteredInvoices.map((invoice, index) => {
                   const status = getDisplayStatus(invoice);
 
                   return (
                     <tr
                       key={invoice.id}
-                      className="hover:bg-slate-50/70 transition-colors"
+                      className="hover:bg-canvas/70 transition-colors"
                     >
-                      <td className="px-6 py-4 font-mono text-xs font-medium text-slate-500 whitespace-nowrap">
+                      <td className="px-4 py-2.5 text-xs tabular-nums font-medium text-muted whitespace-nowrap">
                         {invoice.invoiceNumber}
                       </td>
 
-                      <td className="px-4 py-4">
+                      <td className="px-3 py-2.5">
                         <div className="flex items-center gap-2.5">
                           <div
-                            className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 ${avatarColors[index % avatarColors.length]
+                            className={`hidden sm:flex w-8 h-8 rounded-full items-center justify-center text-xs font-bold flex-shrink-0 ${avatarColors[index % avatarColors.length]
                               }`}
                           >
                             {getInitials(invoice.client.name)}
                           </div>
                           <div>
-                            <p className="font-medium text-slate-800">
+                            <p className="font-medium text-navy whitespace-nowrap">
                               {invoice.client.name}
                             </p>
                             {invoice.client.company &&
                               invoice.client.company !== invoice.client.name && (
-                                <p className="text-xs text-slate-400">
+                                <p className="hidden sm:block text-xs text-slate-400">
                                   {invoice.client.company}
                                 </p>
                               )}
@@ -333,19 +370,19 @@ export default function InvoicesPage() {
                         </div>
                       </td>
 
-                      <td className="px-4 py-4 font-semibold text-slate-900 whitespace-nowrap">
+                      <td className="px-3 py-2.5 font-semibold text-navy whitespace-nowrap">
                         {formatAmount(invoice.amount, invoice.currency)}
                       </td>
 
-                      <td className="px-4 py-4 text-slate-500 hidden md:table-cell whitespace-nowrap">
+                      <td className="px-3 py-2.5 text-muted hidden md:table-cell whitespace-nowrap">
                         {formatDate(invoice.issueDate)}
                       </td>
 
-                      <td className="px-4 py-4 text-slate-500 whitespace-nowrap">
+                      <td className="px-3 py-2.5 text-muted whitespace-nowrap hidden sm:table-cell">
                         {formatDate(invoice.dueDate)}
                       </td>
 
-                      <td className="px-4 py-4">
+                      <td className="px-3 py-2.5">
                         <span
                           className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold ${getStatusStyle(
                             status
@@ -353,19 +390,16 @@ export default function InvoicesPage() {
                         >
                           {status}
                         </span>
+                        {/* Small screens: payment indicator sits under the status (column hidden). */}
+                        {(invoice.status === "SENT" ||
+                          invoice.status === "OVERDUE" ||
+                          (invoice.status === "PAID" && invoice.paypalCaptureId)) && (
+                          <div className="mt-1 sm:hidden">{renderPayment(invoice)}</div>
+                        )}
                       </td>
 
-                      <td className="px-6 py-4 text-right whitespace-nowrap">
-                        {(invoice.status === "SENT" || invoice.status === "OVERDUE") && (
-                          <button
-                            id={`pay-paypal-${invoice.id}`}
-                            onClick={() => payWithPaypal(invoice)}
-                            disabled={payingId !== null}
-                            className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-amber-400 hover:bg-amber-500 text-slate-900 transition-colors disabled:opacity-50"
-                          >
-                            {payingId === invoice.id ? "Redirecting..." : "Pay with PayPal"}
-                          </button>
-                        )}
+                      <td className="px-4 py-2.5 text-right whitespace-nowrap hidden sm:table-cell">
+                        {renderPayment(invoice)}
                       </td>
                     </tr>
                   );
@@ -375,7 +409,7 @@ export default function InvoicesPage() {
                   <tr>
                     <td
                       colSpan={7}
-                      className="px-6 py-12 text-center text-slate-500"
+                      className="px-6 py-12 text-center text-muted"
                     >
                       {invoices.length === 0
                         ? "No invoices yet. Create your first invoice to get started."
@@ -387,7 +421,7 @@ export default function InvoicesPage() {
             </table>
           </div>
 
-          <div className="px-6 py-3 bg-slate-50 border-t border-slate-100 flex items-center justify-between">
+          <div className="px-4 py-2 bg-canvas border-t border-line flex items-center justify-between">
             <p className="text-xs text-slate-400">
               Showing {filteredInvoices.length} of {invoices.length} invoices
             </p>

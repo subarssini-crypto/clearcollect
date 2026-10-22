@@ -7,7 +7,9 @@
  * Status may only be set to PAID by the verified PayPal capture flow (src/lib/paypal.ts).
  */
 
+import { requireOwner } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { readJsonBody } from "@/lib/request";
 import {
   validateUpdateInvoice,
   validationErrorResponse,
@@ -25,9 +27,12 @@ function parseId(ctx: RouteContext<"/api/invoices/[id]">): Promise<number | null
 }
 
 export async function GET(
-  _request: Request,
+  request: Request,
   ctx: RouteContext<"/api/invoices/[id]">
 ): Promise<Response> {
+  const denied = await requireOwner(request);
+  if (denied) return denied;
+
   const id = await parseId(ctx);
   if (id === null) {
     return Response.json({ ok: false, error: "id must be a positive integer" }, { status: 400 });
@@ -52,20 +57,17 @@ export async function PATCH(
   request: Request,
   ctx: RouteContext<"/api/invoices/[id]">
 ): Promise<Response> {
+  const denied = await requireOwner(request);
+  if (denied) return denied;
+
   const id = await parseId(ctx);
   if (id === null) {
     return Response.json({ ok: false, error: "id must be a positive integer" }, { status: 400 });
   }
 
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return Response.json(
-      { ok: false, errors: [{ field: "body", message: "Request body must be valid JSON" }] },
-      { status: 400 }
-    );
-  }
+  const parsed = await readJsonBody(request);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.body;
 
   const result = validateUpdateInvoice(body);
   if (!result.ok) return validationErrorResponse(result.errors);
@@ -109,9 +111,12 @@ export async function PATCH(
 }
 
 export async function DELETE(
-  _request: Request,
+  request: Request,
   ctx: RouteContext<"/api/invoices/[id]">
 ): Promise<Response> {
+  const denied = await requireOwner(request);
+  if (denied) return denied;
+
   const id = await parseId(ctx);
   if (id === null) {
     return Response.json({ ok: false, error: "id must be a positive integer" }, { status: 400 });

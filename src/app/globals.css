@@ -5,33 +5,28 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+}
 
-  /* ClearCollect brand colors */
-  --color-navy-950: #0a0f1e;
-  --color-navy-900: #0f172a;
-  --color-navy-800: #1e2d4a;
-  --color-navy-700: #253660;
-  --color-navy-600: #2d4275;
-  --color-accent-500: #3b82f6;
-  --color-accent-400: #60a5fa;
-  --color-accent-300: #93c5fd;
+/* ClearCollect design tokens */
+@theme {
+  --color-brand: #0966d8; /* royal blue — primary actions, active states */
+  --color-brand-dark: #0753b0;
+  --color-brand-50: #eaf2fd;
+  --color-brand-100: #d3e4fa;
+  --color-navy: #07145b; /* headings, key figures */
+  --color-canvas: #f5f6f8; /* app background */
+  --color-line: #e6e8ee; /* card borders, dividers */
+  --color-muted: #6b7280; /* secondary text */
 }
 
 :root {
-  --background: #f8fafc;
-  --foreground: #0f172a;
+  --background: #f5f6f8;
+  --foreground: #07145b;
 }
 
-* {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-}
-
-html,
-body {
-  height: 100%;
-}
+/* Tailwind's preflight already resets margins/padding. A global
+   `* { margin: 0; padding: 0 }` here would be unlayered and override
+   every spacing utility, so it is intentionally not included. */
 
 body {
   background: var(--background);
@@ -40,18 +35,26 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* Smooth scrollbar */
+/* Standard white card: subtle border, small radius, minimal shadow. */
+@utility card {
+  background-color: #ffffff;
+  border: 1px solid var(--color-line);
+  border-radius: 12px;
+  box-shadow: 0 1px 2px rgb(7 20 91 / 0.04);
+}
+
+/* Slim scrollbars */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: #f1f5f9;
+  background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
+  background: #cfd4dc;
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8;
+  background: #9aa3b2;
 }

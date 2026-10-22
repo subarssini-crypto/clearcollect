@@ -13,6 +13,10 @@ function findFile(base) {
 }
 
 export async function resolve(specifier, context, next) {
+  // `next` has no package exports map, so ESM needs its subpath files spelled
+  // out ("next/server" → "next/server.js") the way bundlers resolve them.
+  if (/^next\/[\w/-]+$/.test(specifier)) return next(`${specifier}.js`, context);
+
   let base = null;
   if (specifier.startsWith("@/")) {
     base = path.join(src, specifier.slice(2));

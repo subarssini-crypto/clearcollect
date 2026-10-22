@@ -411,7 +411,36 @@ export function describePaymentError(err: unknown): { status: number; message: s
   return { status: 500, message: "Payment processing failed" };
 }
 
-/** Public origin used for PayPal return/cancel URLs. */
+/** Public origin used to redirect the browser back into the app. */
 export function getAppOrigin(requestUrl: string): string {
   return process.env.APP_URL?.replace(/\/$/, "") || new URL(requestUrl).origin;
+}
+
+const LOCAL_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * Trusted origin for the return/cancel URLs embedded in a new PayPal order.
+ * Orders are stored and reused for later payers, so this must never come from
+ * a spoofable Host header: it is APP_URL, or — when APP_URL is unset — only a
+ * local development origin.
+ */
+export function getPaymentReturnOrigin(requestUrl: string, appUrl = process.env.APP_URL): string {
+  const configured = appUrl?.trim();
+  if (configured) {
+    let parsed: URL;
+    try {
+      parsed = new URL(configured);
+    } catch {
+      throw new PaymentError("APP_URL is not a valid URL", 500);
+    }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      throw new PaymentError("APP_URL must be an http(s) URL", 500);
+    }
+    return parsed.origin;
+  }
+  const request = new URL(requestUrl);
+  if (!LOCAL_HOSTNAMES.has(request.hostname)) {
+    throw new PaymentError("APP_URL must be set to accept payments outside local development", 500);
+  }
+  return request.origin;
 }

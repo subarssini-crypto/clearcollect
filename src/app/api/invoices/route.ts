@@ -7,8 +7,10 @@
  * Invoice status may only be set to PAID by a verified payment webhook.
  */
 
-import { type NextRequest } from "next/server";
+import { requireOwner } from "@/lib/auth";
+import type { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { readJsonBody } from "@/lib/request";
 import { InvoiceStatus } from "@/generated/prisma/enums";
 import {
   validateCreateInvoice,
@@ -24,6 +26,9 @@ import {
 const VALID_STATUSES = new Set(Object.values(InvoiceStatus));
 
 export async function GET(request: NextRequest): Promise<Response> {
+  const denied = await requireOwner(request);
+  if (denied) return denied;
+
   try {
     const { searchParams } = request.nextUrl;
 
@@ -92,15 +97,12 @@ export async function GET(request: NextRequest): Promise<Response> {
 }
 
 export async function POST(request: Request): Promise<Response> {
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return Response.json(
-      { ok: false, errors: [{ field: "body", message: "Request body must be valid JSON" }] },
-      { status: 400 }
-    );
-  }
+  const denied = await requireOwner(request);
+  if (denied) return denied;
+
+  const parsed = await readJsonBody(request);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.body;
 
   const result = validateCreateInvoice(body);
   if (!result.ok) return validationErrorResponse(result.errors);

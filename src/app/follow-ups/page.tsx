@@ -1,201 +1,319 @@
 "use client";
 
-import { useState } from "react";
+import Link from "next/link";
+import { useEffect, useMemo, useState } from "react";
+import { displayStatus, type DashboardInvoice } from "@/lib/dashboard-metrics";
+import { Avatar, Notice, PageHeader, Page, btnPrimary, btnSecondary, inputClass } from "@/components/ui";
 
-// ── Sample follow-up tasks — demo data only ──
-const initialFollowUps = [
-  {
-    id: 1,
-    client: "Acme Corp",
-    initials: "AC",
-    color: "bg-violet-100 text-violet-700",
-    invoice: "INV-2024-001",
-    amount: "$3,500",
-    daysOverdue: 8,
-    status: "Overdue",
-    urgency: "high",
-    reminder: `Hi John,\n\nJust following up on Invoice INV-2024-001 for $3,500, which was due on October 15th and is now 8 days overdue.\n\nCould you please arrange payment at your earliest convenience?\n\nThank you,\nJane`,
-  },
-  {
-    id: 2,
-    client: "Ridge Analytics",
-    initials: "RA",
-    color: "bg-indigo-100 text-indigo-700",
-    invoice: "INV-2024-007",
-    amount: "$4,100",
-    daysOverdue: 17,
-    status: "Overdue",
-    urgency: "high",
-    reminder: `Hi Team,\n\nThis is a reminder that Invoice INV-2024-007 for $4,100 remains unpaid and is now 17 days past due.\n\nPlease let me know if there's anything I can help resolve.\n\nBest,\nJane`,
-  },
-  {
-    id: 3,
-    client: "Stellar Labs",
-    initials: "SL",
-    color: "bg-emerald-100 text-emerald-700",
-    invoice: "INV-2024-003",
-    amount: "$5,800",
-    daysOverdue: 0,
-    dueIn: 7,
-    status: "Pending",
-    urgency: "medium",
-    reminder: `Hi Dev Team,\n\nJust a friendly heads-up that Invoice INV-2024-003 for $5,800 is due in 7 days (October 25th).\n\nPlease don't hesitate to reach out with any questions.\n\nThanks,\nJane`,
-  },
-];
+type ApiList<T> = { ok: boolean; data?: T[]; error?: string; meta?: { pages: number } };
+
+type FollowUp = {
+  invoice: DashboardInvoice;
+  overdue: boolean;
+  days: number; // days overdue, or days until due
+};
+
+const DAY_MS = 86_400_000;
+const DUE_SOON_DAYS = 7;
+
+function money(amount: string | number, currency: string) {
+  try {
+    return new Intl.NumberFormat("en-US", { style: "currency", currency }).format(Number(amount));
+  } catch {
+    return `${currency} ${Number(amount).toFixed(2)}`;
+  }
+}
+
+function longDate(value: string) {
+  return new Date(`${value.slice(0, 10)}T00:00:00Z`).toLocaleDateString("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+/** Reminder text built from the invoice record (editable before sending). */
+function draftReminder({ invoice, overdue, days }: FollowUp) {
+  const amount = money(invoice.amount, invoice.currency);
+  const timing = overdue
+    ? `was due on ${longDate(invoice.dueDate)} and is now ${days} day${days === 1 ? "" : "s"} overdue`
+    : `is due on ${longDate(invoice.dueDate)}${days === 0 ? " (today)" : ` (in ${days} day${days === 1 ? "" : "s"})`}`;
+  return `Hi ${invoice.client.name},
+
+${overdue ? "Just following up on" : "A friendly reminder about"} invoice ${invoice.invoiceNumber} for ${amount}, which ${timing}.
+
+${overdue ? "Could you please arrange payment at your earliest convenience?" : "Please let me know if you have any questions before then."}
+
+Thank you!`;
+}
+
+async function loadInvoices(): Promise<DashboardInvoice[]> {
+  const all: DashboardInvoice[] = [];
+  for (let page = 1; ; page++) {
+    const res = await fetch(`/api/invoices?limit=100&page=${page}`);
+    const json: ApiList<DashboardInvoice> = await res.json();
+    if (!res.ok || !json.ok || !json.data) throw new Error(json.error || "Could not load invoices.");
+    all.push(...json.data);
+    if (page >= (json.meta?.pages ?? 1)) break;
+  }
+  return all;
+}
+
+type Delivery = "zapier" | "demo" | "misconfigured";
+type Outcome = { tone: "success" | "info" | "error"; text: string };
 
 export default function FollowUpsPage() {
-  const [followUps, setFollowUps] = useState(initialFollowUps);
-  const [activeId, setActiveId] = useState<number | null>(null);
+  const [data, setData] = useState<{ invoices: DashboardInvoice[]; now: number } | null>(null);
+  const [error, setError] = useState("");
+  const [delivery, setDelivery] = useState<Delivery | null>(null);
+  const [subjects, setSubjects] = useState<Record<number, string>>({});
+  const [drafts, setDrafts] = useState<Record<number, string>>({});
+  const [openId, setOpenId] = useState<number | null>(null);
+  const [busy, setBusy] = useState<{ id: number; action: "draft" | "send" } | null>(null);
+  const [outcomes, setOutcomes] = useState<Record<number, Outcome>>({});
   const [sentIds, setSentIds] = useState<Set<number>>(new Set());
+  const [dismissedIds, setDismissedIds] = useState<Set<number>>(new Set());
 
-  const handleSend = (id: number) => {
-    setSentIds((prev) => new Set([...prev, id]));
-  };
+  useEffect(() => {
+    let cancelled = false;
+    loadInvoices()
+      .then((invoices) => !cancelled && setData({ invoices, now: Date.now() }))
+      .catch((err) => !cancelled && setError(err instanceof Error ? err.message : "Could not load invoices."));
+    fetch("/api/follow-ups/status")
+      .then((res) => res.json())
+      .then((json: { ok: boolean; data?: { delivery: Delivery } }) => !cancelled && json.ok && json.data && setDelivery(json.data.delivery))
+      .catch(() => !cancelled && setDelivery("demo"));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
-  const handleUpdateReminder = (id: number, text: string) => {
-    setFollowUps((prev) =>
-      prev.map((f) => (f.id === id ? { ...f, reminder: text } : f))
-    );
-  };
+  // Unpaid SENT/OVERDUE invoices: overdue first (most overdue first), then due within a week.
+  const followUps = useMemo<FollowUp[]>(() => {
+    if (!data) return [];
+    const today = Date.UTC(new Date(data.now).getUTCFullYear(), new Date(data.now).getUTCMonth(), new Date(data.now).getUTCDate());
+    const items: FollowUp[] = [];
+    for (const invoice of data.invoices) {
+      const status = displayStatus(invoice, data.now);
+      const days = Math.round((Date.parse(`${invoice.dueDate.slice(0, 10)}T00:00:00Z`) - today) / DAY_MS);
+      if (status === "Overdue") items.push({ invoice, overdue: true, days: Math.max(0, -days) });
+      else if (status === "Pending" && days <= DUE_SOON_DAYS) items.push({ invoice, overdue: false, days });
+    }
+    return items.sort((a, b) => (a.overdue === b.overdue ? (a.overdue ? b.days - a.days : a.days - b.days) : a.overdue ? -1 : 1));
+  }, [data]);
+
+  const visible = followUps.filter((f) => !dismissedIds.has(f.invoice.id));
+  const overdueCount = visible.filter((f) => f.overdue).length;
+  const dueSoonCount = visible.length - overdueCount;
+
+  function subjectFor(item: FollowUp) {
+    return subjects[item.invoice.id] ?? `Payment reminder: invoice ${item.invoice.invoiceNumber}`;
+  }
+  function messageFor(item: FollowUp) {
+    return drafts[item.invoice.id] ?? draftReminder(item);
+  }
+  function setOutcome(id: number, outcome: Outcome | null) {
+    setOutcomes((prev) => {
+      const next = { ...prev };
+      if (outcome) next[id] = outcome;
+      else delete next[id];
+      return next;
+    });
+  }
+
+  async function draftWithAi(item: FollowUp) {
+    const id = item.invoice.id;
+    setBusy({ id, action: "draft" });
+    setOutcome(id, null);
+    try {
+      const res = await fetch("/api/follow-ups/draft", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ invoiceId: id }),
+      });
+      const json: { ok: boolean; data?: { subject: string; message: string }; error?: string } = await res.json();
+      if (!res.ok || !json.ok || !json.data) throw new Error(json.error || "Could not draft a reminder.");
+      const { subject, message } = json.data;
+      setSubjects((prev) => ({ ...prev, [id]: subject }));
+      setDrafts((prev) => ({ ...prev, [id]: message }));
+      setOutcome(id, { tone: "info", text: "AI draft ready. Review and edit it before sending." });
+    } catch (err) {
+      setOutcome(id, { tone: "error", text: err instanceof Error ? err.message : "Could not draft a reminder." });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function sendReminder(item: FollowUp) {
+    const id = item.invoice.id;
+    setBusy({ id, action: "send" });
+    setOutcome(id, null);
+    try {
+      const res = await fetch("/api/follow-ups/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ invoiceId: id, subject: subjectFor(item), message: messageFor(item) }),
+      });
+      const json: {
+        ok: boolean;
+        data?: { mode: "demo" | "zapier"; delivered: boolean; detail: string };
+        error?: string;
+        errors?: { message: string }[];
+      } = await res.json();
+      if (!res.ok || !json.ok || !json.data) {
+        throw new Error(json.errors?.map((e) => e.message).join(" ") || json.error || "The reminder was not sent.");
+      }
+      if (json.data.delivered) {
+        setSentIds((prev) => new Set(prev).add(id));
+        setOutcome(id, { tone: "success", text: json.data.detail });
+      } else {
+        setOutcome(id, { tone: "info", text: json.data.detail });
+      }
+    } catch (err) {
+      setOutcome(id, { tone: "error", text: err instanceof Error ? err.message : "The reminder was not sent." });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const deliveryNote =
+    delivery === "zapier"
+      ? "Approved reminders are sent to Zapier, which delivers them by email or Slack."
+      : delivery === "misconfigured"
+        ? "Zapier delivery is misconfigured on the server — reminders cannot be sent."
+        : "Demo mode — Zapier is not configured, so reminders are not actually sent.";
+  const sendLabel = delivery === "zapier" ? "Approve & Send" : "Approve & Send (Demo)";
 
   return (
-    <div className="min-h-full p-6 lg:p-8">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-slate-900">
-          AI Follow-up Assistant
-        </h1>
-        <p className="text-slate-500 text-sm mt-1">
-          AI-drafted payment reminders for overdue and upcoming invoices.{" "}
-          <span className="text-amber-600 font-medium">
-            ⚠ Demo mode — no emails are actually sent.
-          </span>
-        </p>
+    <Page>
+      <PageHeader
+        title="Follow-ups"
+        description="AI-drafted payment reminders for unpaid invoices that are overdue or due within 7 days."
+        actions={<Link href="/invoices" className={btnSecondary}>View invoices</Link>}
+      />
+
+      <div className="mb-4 flex flex-wrap items-center gap-2 text-[13px]">
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-red-50 px-2.5 py-1 font-semibold text-red-700">
+          <span className="h-1.5 w-1.5 rounded-full bg-red-500" />
+          {overdueCount} overdue
+        </span>
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 font-semibold text-amber-700">
+          <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+          {dueSoonCount} due soon
+        </span>
+        {delivery && (
+          <span className={`text-xs ${delivery === "misconfigured" ? "font-medium text-red-600" : "text-muted"}`}>{deliveryNote}</span>
+        )}
       </div>
 
-      {/* Stats bar */}
-      <div className="flex flex-wrap gap-3 mb-6">
-        <div className="bg-red-50 ring-1 ring-red-100 rounded-xl px-4 py-2 flex items-center gap-2 text-sm">
-          <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
-          <span className="text-red-700 font-medium">2 Overdue</span>
+      {error ? (
+        <Notice tone="error">{error}</Notice>
+      ) : !data ? (
+        <div className="card p-8 text-center text-[13px] text-muted">Loading invoices…</div>
+      ) : visible.length === 0 ? (
+        <div className="card p-8 text-center">
+          <p className="text-sm font-semibold text-navy">No follow-ups needed</p>
+          <p className="mt-1 text-[13px] text-muted">No unpaid invoices are overdue or due within the next {DUE_SOON_DAYS} days.</p>
         </div>
-        <div className="bg-amber-50 ring-1 ring-amber-100 rounded-xl px-4 py-2 flex items-center gap-2 text-sm">
-          <span className="w-2 h-2 bg-amber-500 rounded-full" />
-          <span className="text-amber-700 font-medium">1 Due Soon</span>
-        </div>
-      </div>
-
-      {/* Follow-up cards */}
-      <div className="space-y-4">
-        {followUps.map((item) => (
-          <div
-            key={item.id}
-            id={`followup-card-${item.id}`}
-            className={`bg-white rounded-2xl ring-1 overflow-hidden transition-all duration-200 ${
-              item.urgency === "high"
-                ? "ring-red-200 hover:ring-red-300"
-                : "ring-slate-200 hover:ring-amber-200"
-            }`}
-          >
-            {/* Card header */}
-            <div
-              className={`px-5 py-3 flex items-center justify-between text-xs font-semibold ${
-                item.urgency === "high"
-                  ? "bg-red-50 text-red-700 border-b border-red-100"
-                  : "bg-amber-50 text-amber-700 border-b border-amber-100"
-              }`}
-            >
-              <span>
-                {item.urgency === "high"
-                  ? `🚨 ${item.daysOverdue} days overdue`
-                  : `⏰ Due in ${item.dueIn} days`}
-              </span>
-              <span className="font-normal opacity-70">
-                {item.invoice} · {item.amount}
-              </span>
-            </div>
-
-            <div className="p-5">
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-3">
-                  <div
-                    className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold flex-shrink-0 ${item.color}`}
-                  >
-                    {item.initials}
+      ) : (
+        <div className="card divide-y divide-line">
+          {visible.map((item, i) => {
+            const { invoice, overdue, days } = item;
+            const id = invoice.id;
+            const sent = sentIds.has(id);
+            const isBusy = busy?.id === id;
+            const outcome = outcomes[id];
+            return (
+              <div key={id} id={`followup-card-${id}`} className="px-4 py-2.5">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                  <Avatar name={invoice.client.name} index={i} />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-[13px] font-semibold text-navy">{invoice.client.name}</p>
+                    <p className="truncate text-xs text-muted">
+                      <span className="font-medium">{invoice.invoiceNumber}</span> · {money(invoice.amount, invoice.currency)}
+                      {invoice.client.email ? ` · ${invoice.client.email}` : " · no email on file"}
+                    </p>
                   </div>
-                  <div>
-                    <p className="font-semibold text-slate-900">{item.client}</p>
-                    <p className="text-slate-400 text-xs">{item.invoice}</p>
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${overdue ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-700"}`}
+                  >
+                    {overdue ? `${days} day${days === 1 ? "" : "s"} overdue` : days === 0 ? "Due today" : `Due in ${days} day${days === 1 ? "" : "s"}`}
+                  </span>
+                  <div className="flex w-full items-center justify-end gap-3 sm:w-auto">
+                    {sent && <span className="text-[11px] font-semibold text-emerald-700">✓ Sent to Zapier</span>}
+                    <button
+                      id={`toggle-reminder-${id}`}
+                      onClick={() => setOpenId(openId === id ? null : id)}
+                      className="text-xs font-semibold text-brand hover:text-brand-dark"
+                    >
+                      {openId === id ? "Hide Reminder" : "Review Reminder"}
+                    </button>
+                    <button
+                      id={`dismiss-followup-${id}`}
+                      onClick={() => setDismissedIds((prev) => new Set(prev).add(id))}
+                      className="text-xs font-medium text-muted hover:text-navy"
+                    >
+                      Dismiss
+                    </button>
                   </div>
                 </div>
-                <button
-                  id={`toggle-reminder-${item.id}`}
-                  onClick={() =>
-                    setActiveId(activeId === item.id ? null : item.id)
-                  }
-                  className="text-blue-600 hover:text-blue-700 text-sm font-medium flex items-center gap-1 transition-colors"
-                >
-                  {activeId === item.id ? "Hide" : "Edit Reminder"}
-                  <svg
-                    className={`w-4 h-4 transition-transform ${activeId === item.id ? "rotate-180" : ""}`}
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                    strokeWidth={2}
-                  >
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-                  </svg>
-                </button>
-              </div>
 
-              {activeId === item.id && (
-                <div className="mb-4">
-                  <p className="text-xs text-slate-400 font-medium mb-1.5">
-                    Edit the AI-drafted message before sending:
-                  </p>
-                  <textarea
-                    id={`reminder-edit-${item.id}`}
-                    value={item.reminder}
-                    onChange={(e) =>
-                      handleUpdateReminder(item.id, e.target.value)
-                    }
-                    rows={8}
-                    className="w-full border border-slate-200 rounded-xl px-3 py-3 text-sm text-slate-700 font-mono leading-relaxed bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none transition"
-                  />
-                </div>
-              )}
-
-              <div className="flex items-center gap-3">
-                <button
-                  id={`send-followup-${item.id}`}
-                  onClick={() => handleSend(item.id)}
-                  className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-xl transition-all ${
-                    sentIds.has(item.id)
-                      ? "bg-emerald-100 text-emerald-700 cursor-default"
-                      : "bg-blue-600 hover:bg-blue-700 text-white shadow-sm shadow-blue-200"
-                  }`}
-                >
-                  {sentIds.has(item.id) ? (
-                    <>✓ Sent (Demo)</>
-                  ) : (
-                    <>
-                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-                      </svg>
-                      Send Reminder (Demo)
-                    </>
-                  )}
-                </button>
-                <button
-                  id={`dismiss-followup-${item.id}`}
-                  className="text-slate-400 hover:text-slate-600 text-sm font-medium transition-colors"
-                >
-                  Dismiss
-                </button>
+                {openId === id && (
+                  <div className="mt-2.5 space-y-2 rounded-lg border border-line bg-canvas/60 p-3">
+                    <div>
+                      <label htmlFor={`reminder-subject-${id}`} className="mb-1 block text-xs font-medium text-muted">
+                        Subject
+                      </label>
+                      <input
+                        id={`reminder-subject-${id}`}
+                        value={subjectFor(item)}
+                        maxLength={200}
+                        onChange={(e) => setSubjects((prev) => ({ ...prev, [id]: e.target.value }))}
+                        className={`${inputClass} text-xs font-semibold`}
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor={`reminder-edit-${id}`} className="mb-1 block text-xs font-medium text-muted">
+                        Message
+                      </label>
+                      <textarea
+                        id={`reminder-edit-${id}`}
+                        value={messageFor(item)}
+                        maxLength={5000}
+                        onChange={(e) => setDrafts((prev) => ({ ...prev, [id]: e.target.value }))}
+                        rows={6}
+                        className={`${inputClass} block max-h-72 overflow-y-auto resize-y text-xs leading-relaxed`}
+                      />
+                    </div>
+                    {outcome && (
+                      <Notice tone={outcome.tone === "success" ? "success" : outcome.tone === "error" ? "error" : "info"}>{outcome.text}</Notice>
+                    )}
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                      <button
+                        id={`draft-ai-${id}`}
+                        onClick={() => draftWithAi(item)}
+                        disabled={isBusy}
+                        className={`${btnSecondary} !px-3 !py-1.5 !text-xs`}
+                      >
+                        {isBusy && busy?.action === "draft" ? "Drafting…" : "Draft with AI"}
+                      </button>
+                      <button
+                        id={`send-followup-${id}`}
+                        onClick={() => sendReminder(item)}
+                        disabled={isBusy || delivery === "misconfigured"}
+                        className={`${btnPrimary} !px-3 !py-1.5 !text-xs`}
+                      >
+                        {isBusy && busy?.action === "send" ? "Sending…" : sendLabel}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
+            );
+          })}
+        </div>
+      )}
+    </Page>
   );
 }

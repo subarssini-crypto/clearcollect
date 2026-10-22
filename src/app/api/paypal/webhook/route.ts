@@ -19,6 +19,7 @@ import {
   describePaymentError,
   verifyWebhookSignature,
 } from "@/lib/paypal";
+import { readBodyText } from "@/lib/request";
 
 const MAX_BODY_BYTES = 256 * 1024;
 const ORDER_ID_PATTERN = /^[A-Z0-9]{1,36}$/i;
@@ -51,8 +52,9 @@ function ack(eventId: string | undefined, result: string): Response {
 }
 
 export async function POST(request: Request): Promise<Response> {
-  const rawBody = await request.text();
-  if (Buffer.byteLength(rawBody, "utf8") > MAX_BODY_BYTES) {
+  // Read incrementally so an oversized body is never fully buffered.
+  const rawBody = await readBodyText(request, MAX_BODY_BYTES);
+  if (rawBody === null) {
     return Response.json({ ok: false, error: "Payload too large" }, { status: 413 });
   }
 

@@ -246,12 +246,12 @@ export default function ClientsPage() {
   }
 
   return (
-    <div className="min-h-full p-6 lg:p-8">
+    <div className="mx-auto w-full max-w-[1440px] px-4 py-5 sm:px-6 lg:px-8">
       {/* Header */}
-      <div className="mb-6 flex items-center justify-between gap-4">
+      <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Clients</h1>
-          <p className="text-slate-500 text-sm mt-1">
+          <h1 className="text-xl font-bold tracking-tight text-navy">Clients</h1>
+          <p className="text-muted text-[13px] mt-0.5">
             View and manage your clients stored in the database.
           </p>
         </div>
@@ -262,7 +262,7 @@ export default function ClientsPage() {
             setFormError("");
             setIsModalOpen(true);
           }}
-          className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2.5 rounded-xl transition-colors shadow-sm shadow-blue-200 whitespace-nowrap"
+          className="flex items-center gap-2 bg-brand hover:bg-brand-dark text-white text-[13px] font-semibold px-3.5 py-2 rounded-lg transition-colors whitespace-nowrap"
         >
           <svg
             className="w-4 h-4"
@@ -284,7 +284,7 @@ export default function ClientsPage() {
       {pageError && (
         <div
           role="alert"
-          className="mb-5 rounded-xl bg-red-50 p-4 text-sm text-red-700 ring-1 ring-red-200"
+          className="mb-4 rounded-lg bg-red-50 p-4 text-sm text-red-700 ring-1 ring-red-200"
         >
           {pageError}
           <button
@@ -298,16 +298,16 @@ export default function ClientsPage() {
 
       {/* Loading state */}
       {isLoading && (
-        <div className="rounded-2xl bg-white p-10 text-center text-sm text-slate-500 ring-1 ring-slate-200">
+        <div className="card p-10 text-center text-[13px] text-muted">
           Loading clients from the database...
         </div>
       )}
 
       {/* Empty state */}
       {!isLoading && !pageError && clients.length === 0 && (
-        <div className="rounded-2xl bg-white p-10 text-center ring-1 ring-slate-200">
-          <h2 className="font-semibold text-slate-900">No clients yet</h2>
-          <p className="mt-2 text-sm text-slate-500">
+        <div className="card p-10 text-center">
+          <h2 className="font-semibold text-navy">No clients yet</h2>
+          <p className="mt-2 text-sm text-muted">
             Add your first client to start creating invoices.
           </p>
         </div>
@@ -349,19 +349,19 @@ export default function ClientsPage() {
               <div
                 key={client.id}
                 id={`client-card-${client.id}`}
-                className="bg-white rounded-2xl ring-1 ring-slate-200 hover:ring-blue-200 hover:shadow-md p-5 transition-all duration-200"
+                className="card flex flex-col hover:border-brand-100 p-4 transition-all duration-200"
               >
                 <div className="flex items-start justify-between mb-4 gap-3">
                   <div className="flex items-center gap-3 min-w-0">
                     <div
-                      className={`w-11 h-11 rounded-xl flex items-center justify-center text-sm font-bold flex-shrink-0 ${avatarColors[index % avatarColors.length]
+                      className={`w-11 h-11 rounded-lg flex items-center justify-center text-sm font-bold flex-shrink-0 ${avatarColors[index % avatarColors.length]
                         }`}
                     >
                       {getInitials(client.name)}
                     </div>
 
                     <div className="min-w-0">
-                      <h3 className="font-semibold text-slate-900 break-words">
+                      <h3 className="font-semibold text-navy break-words">
                         {client.name}
                       </h3>
                       <p className="text-slate-400 text-xs truncate">
@@ -376,17 +376,17 @@ export default function ClientsPage() {
                 </div>
 
                 {client.company && client.company !== client.name && (
-                  <p className="text-xs text-slate-500 mb-4">
+                  <p className="text-xs text-muted mb-4">
                     {client.company}
                   </p>
                 )}
 
                 <div className="grid grid-cols-2 gap-3 text-sm mb-4">
-                  <div className="bg-slate-50 rounded-lg p-3">
+                  <div className="bg-canvas rounded-lg p-3">
                     <p className="text-slate-400 text-xs mb-0.5">
                       Total Invoiced
                     </p>
-                    <p className="font-bold text-slate-900">
+                    <p className="font-bold text-navy">
                       {currency
                         ? formatMoney(totalInvoiced, currency)
                         : currencies.size > 1
@@ -395,17 +395,17 @@ export default function ClientsPage() {
                     </p>
                   </div>
 
-                  <div className="bg-slate-50 rounded-lg p-3">
+                  <div className="bg-canvas rounded-lg p-3">
                     <p className="text-slate-400 text-xs mb-0.5">
                       Invoices
                     </p>
-                    <p className="font-bold text-slate-900">
+                    <p className="font-bold text-navy">
                       {client._count?.invoices ?? clientInvoices.length}
                     </p>
                   </div>
                 </div>
 
-                <div className="flex items-center justify-between gap-3 text-xs text-slate-400 border-t border-slate-100 pt-3">
+                <div className="mt-auto flex items-center justify-between gap-3 text-xs text-slate-400 border-t border-line pt-3">
                   <span>
                     {lastInvoice
                       ? `Last invoice: ${formatDate(lastInvoice.issueDate)}`
@@ -414,7 +414,7 @@ export default function ClientsPage() {
 
                   <Link
                     href="/create-invoice"
-                    className="text-blue-600 hover:text-blue-700 font-medium transition-colors whitespace-nowrap"
+                    className="text-brand hover:text-brand-dark font-medium transition-colors whitespace-nowrap"
                   >
                     + Invoice
                   </Link>
@@ -439,17 +439,17 @@ export default function ClientsPage() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="add-client-title"
-            className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl"
+            className="w-full max-w-md rounded-lg bg-white p-5 shadow-xl"
           >
-            <div className="mb-5 flex items-center justify-between">
+            <div className="mb-4 flex items-center justify-between">
               <div>
                 <h2
                   id="add-client-title"
-                  className="text-lg font-bold text-slate-900"
+                  className="text-lg font-bold text-navy"
                 >
                   Add Client
                 </h2>
-                <p className="mt-1 text-sm text-slate-500">
+                <p className="mt-1 text-sm text-muted">
                   Client details will be saved to MySQL.
                 </p>
               </div>
@@ -469,7 +469,7 @@ export default function ClientsPage() {
               <div>
                 <label
                   htmlFor="new-client-name"
-                  className="mb-1.5 block text-sm font-medium text-slate-700"
+                  className="mb-1 block text-xs font-medium text-muted"
                 >
                   Client Name *
                 </label>
@@ -480,14 +480,14 @@ export default function ClientsPage() {
                   value={name}
                   onChange={(event) => setName(event.target.value)}
                   placeholder="e.g. Acme Corp"
-                  className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                  className="w-full rounded-lg border border-line px-3 py-2 text-[13px] outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/15"
                 />
               </div>
 
               <div>
                 <label
                   htmlFor="new-client-company"
-                  className="mb-1.5 block text-sm font-medium text-slate-700"
+                  className="mb-1 block text-xs font-medium text-muted"
                 >
                   Company
                 </label>
@@ -497,14 +497,14 @@ export default function ClientsPage() {
                   value={company}
                   onChange={(event) => setCompany(event.target.value)}
                   placeholder="Company name (optional)"
-                  className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                  className="w-full rounded-lg border border-line px-3 py-2 text-[13px] outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/15"
                 />
               </div>
 
               <div>
                 <label
                   htmlFor="new-client-email"
-                  className="mb-1.5 block text-sm font-medium text-slate-700"
+                  className="mb-1 block text-xs font-medium text-muted"
                 >
                   Email
                 </label>
@@ -515,7 +515,7 @@ export default function ClientsPage() {
                   value={email}
                   onChange={(event) => setEmail(event.target.value)}
                   placeholder="billing@example.com"
-                  className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                  className="w-full rounded-lg border border-line px-3 py-2 text-[13px] outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/15"
                 />
               </div>
 
@@ -528,12 +528,12 @@ export default function ClientsPage() {
                 </p>
               )}
 
-              <div className="flex justify-end gap-3 border-t border-slate-100 pt-4">
+              <div className="flex justify-end gap-3 border-t border-line pt-4">
                 <button
                   type="button"
                   disabled={isSaving}
                   onClick={() => setIsModalOpen(false)}
-                  className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                  className="rounded-lg border border-line px-3.5 py-2 text-[13px] font-semibold text-slate-600 hover:bg-canvas disabled:opacity-50"
                 >
                   Cancel
                 </button>
@@ -541,7 +541,7 @@ export default function ClientsPage() {
                 <button
                   type="submit"
                   disabled={isSaving}
-                  className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="rounded-lg bg-brand px-3.5 py-2 text-sm font-medium text-white transition hover:bg-brand-dark disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {isSaving ? "Saving..." : "Save Client"}
                 </button>
