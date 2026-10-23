@@ -203,6 +203,52 @@ describe("light/dark theme", () => {
   });
 });
 
+describe("expandable sidebar rail", () => {
+  const shell = readFileSync(new URL("../src/components/AppShell.tsx", import.meta.url), "utf8");
+
+  test("is collapsed (icon-only) by default", () => {
+    assert.match(shell, /const \[railExpanded, setRailExpanded\] = useState\(false\);/);
+    assert.match(shell, /railExpanded \? "w-52 items-stretch overflow-hidden px-2\.5" : "w-14 items-center"/);
+  });
+
+  test("has an accessible toggle at the top of the rail that flips the state", () => {
+    // A native <button>: focusable and operable with Enter/Space.
+    assert.match(shell, /<button\s+type="button"\s+id="sidebar-toggle"/);
+    assert.match(shell, /const label = expanded \? "Collapse sidebar" : "Expand sidebar";/);
+    assert.match(shell, /aria-label=\{label\}\s+aria-expanded=\{expanded\}\s+aria-controls="quick-navigation"/);
+    assert.match(shell, /<aside\s+id="quick-navigation"/);
+    // First child of the rail, before the links.
+    assert.match(shell, /aria-label="Quick navigation"\s*>\s*<RailToggle expanded=\{railExpanded\} onToggle=\{\(\) => setRailExpanded\(\(open\) => !open\)\} \/>/);
+    assert.match(shell, /focus-visible:ring-2/);
+  });
+
+  test("expanded shows labels next to icons; collapsed keeps tooltips and accessible names", () => {
+    assert.match(shell, /\{expanded \? \(\s*<span className="truncate whitespace-nowrap text-\[13px\] font-semibold">\{item\.label\}<\/span>\s*\) : \(\s*<span className=\{railTooltip\}>\{item\.label\}<\/span>/);
+    assert.match(shell, /title=\{expanded \? undefined : item\.label\}/);
+    assert.match(shell, /aria-label=\{expanded \? undefined : item\.label\}/);
+  });
+
+  test("animates width without overlapping content, and respects reduced motion", () => {
+    assert.match(shell, /transition-\[width\] duration-200 ease-out motion-reduce:transition-none/);
+    // The rail is a flex sibling of main, which can shrink (no overlay, no overflow).
+    assert.match(shell, /<main id="main-content" className="min-w-0 flex-1 overflow-y-auto">/);
+    assert.doesNotMatch(shell, /<aside[^>]*\b(fixed|absolute)\b/);
+  });
+
+  test("navigation is preserved: every item, active highlighting, Settings at the bottom", () => {
+    assert.match(shell, /\{NAV\.slice\(0, -1\)\.map\(\(item\) => \(\s*<RailLink key=\{item\.href\} item=\{item\} pathname=\{pathname\} expanded=\{railExpanded\} \/>/);
+    assert.match(shell, /<RailLink item=\{NAV\[NAV\.length - 1\]\} pathname=\{pathname\} expanded=\{railExpanded\} \/>/);
+    assert.match(shell, /aria-current=\{active \? "page" : undefined\}/);
+    assert.match(shell, /active \? "bg-brand-50 text-brand" : "text-slate-400 hover:bg-canvas hover:text-navy"/);
+    assert.match(shell, /return href === "\/" \? pathname === "\/" : pathname\.startsWith\(href\);/);
+  });
+
+  test("phones keep the header menu: the rail stays hidden below md", () => {
+    assert.match(shell, /className=\{`hidden flex-shrink-0 flex-col[^`]*md:flex/);
+    assert.match(shell, /id="mobile-menu-toggle"/);
+  });
+});
+
 describe("login page explains first-time setup", () => {
   const text = visibleText(loginPage);
 

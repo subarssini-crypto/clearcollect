@@ -47,23 +47,59 @@ function isActive(pathname: string, href: string) {
   return href === "/" ? pathname === "/" : pathname.startsWith(href);
 }
 
-function RailLink({ item, pathname }: { item: NavItem; pathname: string }) {
+const railTooltip =
+  "pointer-events-none absolute left-full z-50 ml-2.5 whitespace-nowrap rounded-md bg-navy px-2 py-1 text-[11px] font-medium text-surface opacity-0 shadow transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100";
+
+// Collapsed: a 36px square centred in the 56px rail. Expanded: full width
+// with the icon at the same x-position (10px rail padding + 9px), so icons
+// do not jump when the rail opens.
+const railItem = (expanded: boolean) =>
+  `group relative flex h-9 items-center rounded-lg transition-colors ${expanded ? "w-full gap-3 px-[9px]" : "w-9 justify-center"}`;
+
+function RailLink({ item, pathname, expanded }: { item: NavItem; pathname: string; expanded: boolean }) {
   const active = isActive(pathname, item.href);
   return (
     <Link
       href={item.href}
-      title={item.label}
-      aria-label={item.label}
+      // Collapsed: the label is only a tooltip, so name the link explicitly.
+      title={expanded ? undefined : item.label}
+      aria-label={expanded ? undefined : item.label}
       aria-current={active ? "page" : undefined}
-      className={`group relative flex h-9 w-9 items-center justify-center rounded-lg transition-colors ${
-        active ? "bg-brand-50 text-brand" : "text-slate-400 hover:bg-canvas hover:text-navy"
-      }`}
+      className={`${railItem(expanded)} ${active ? "bg-brand-50 text-brand" : "text-slate-400 hover:bg-canvas hover:text-navy"}`}
     >
-      <Icon paths={item.icon} />
-      <span className="pointer-events-none absolute left-full z-50 ml-2.5 whitespace-nowrap rounded-md bg-navy px-2 py-1 text-[11px] font-medium text-surface opacity-0 shadow transition-opacity group-hover:opacity-100">
-        {item.label}
-      </span>
+      <Icon paths={item.icon} className="h-[18px] w-[18px] flex-shrink-0" />
+      {expanded ? (
+        <span className="truncate whitespace-nowrap text-[13px] font-semibold">{item.label}</span>
+      ) : (
+        <span className={railTooltip}>{item.label}</span>
+      )}
     </Link>
+  );
+}
+
+/** Top-of-rail button: double chevron pointing the way the rail will move. */
+function RailToggle({ expanded, onToggle }: { expanded: boolean; onToggle: () => void }) {
+  const label = expanded ? "Collapse sidebar" : "Expand sidebar";
+  return (
+    <button
+      type="button"
+      id="sidebar-toggle"
+      onClick={onToggle}
+      aria-label={label}
+      aria-expanded={expanded}
+      aria-controls="quick-navigation"
+      className={`${railItem(expanded)} text-slate-400 hover:bg-canvas hover:text-navy focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40`}
+    >
+      <Icon
+        paths={[expanded ? "M11 19l-7-7 7-7m8 14l-7-7 7-7" : "M13 5l7 7-7 7M5 5l7 7-7 7"]}
+        className="h-[18px] w-[18px] flex-shrink-0"
+      />
+      {expanded ? (
+        <span className="truncate whitespace-nowrap text-[13px] font-semibold">Collapse</span>
+      ) : (
+        <span className={railTooltip}>{label}</span>
+      )}
+    </button>
   );
 }
 
@@ -80,6 +116,8 @@ async function signOut() {
 export default function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const [menuOpen, setMenuOpen] = useState(false);
+  // Desktop rail: icon-only by default on every load.
+  const [railExpanded, setRailExpanded] = useState(false);
 
   // The login page renders without app navigation.
   if (pathname === "/login") {
@@ -186,13 +224,24 @@ export default function AppShell({ children }: { children: ReactNode }) {
       </header>
 
       <div className="flex min-h-0 flex-1">
-        {/* Narrow icon rail (tablet and up) */}
-        <aside className="hidden w-14 flex-shrink-0 flex-col items-center gap-1.5 border-r border-line bg-surface py-3 md:flex" aria-label="Quick navigation">
+        {/* Icon rail (tablet and up; phones use the header menu). Collapsed by
+            default; expanding animates its width, and main (min-w-0 flex-1)
+            narrows alongside instead of being overlapped. Clipping applies
+            only while expanded so collapsed-mode tooltips can extend past the rail. */}
+        <aside
+          id="quick-navigation"
+          className={`hidden flex-shrink-0 flex-col gap-1.5 border-r border-line bg-surface py-3 transition-[width] duration-200 ease-out motion-reduce:transition-none md:flex ${
+            railExpanded ? "w-52 items-stretch overflow-hidden px-2.5" : "w-14 items-center"
+          }`}
+          aria-label="Quick navigation"
+        >
+          <RailToggle expanded={railExpanded} onToggle={() => setRailExpanded((open) => !open)} />
+          <div className={`mb-0.5 self-stretch border-t border-line ${railExpanded ? "mx-1" : "mx-2.5"}`} aria-hidden="true" />
           {NAV.slice(0, -1).map((item) => (
-            <RailLink key={item.href} item={item} pathname={pathname} />
+            <RailLink key={item.href} item={item} pathname={pathname} expanded={railExpanded} />
           ))}
-          <div className="mt-auto">
-            <RailLink item={NAV[NAV.length - 1]} pathname={pathname} />
+          <div className={`mt-auto ${railExpanded ? "w-full" : ""}`}>
+            <RailLink item={NAV[NAV.length - 1]} pathname={pathname} expanded={railExpanded} />
           </div>
         </aside>
 
