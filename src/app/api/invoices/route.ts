@@ -1,7 +1,9 @@
 /**
  * GET  /api/invoices        — list invoices (with optional ?status= and ?clientId= filters)
  * POST /api/invoices        — create a new invoice (invoiceNumber optional: omitted/blank
- *                               assigns the next INV-YYYY-NNN number for the issue year)
+ *                               assigns the next INV-YYYY-NNN number for the issue year;
+ *                               optional lineItems must add up to amount). Never emails —
+ *                               sending is POST /api/invoices/[id]/send.
  *
  * Security note: PAID status cannot be set via this endpoint.
  * Invoice status may only be set to PAID by a verified payment webhook.
@@ -107,7 +109,7 @@ export async function POST(request: Request): Promise<Response> {
   const result = validateCreateInvoice(body);
   if (!result.ok) return validationErrorResponse(result.errors);
 
-  const { amount, invoiceNumber, ...rest } = result.data;
+  const { amount, invoiceNumber, lineItems, ...rest } = result.data;
 
   try {
     // Verify the referenced client exists before creating the invoice
@@ -129,6 +131,7 @@ export async function POST(request: Request): Promise<Response> {
           invoiceNumber: number,
           // Convert to string for Prisma's Decimal field — avoids floating point drift
           amount: amount.toFixed(2),
+          ...(lineItems ? { lineItems: lineItems as unknown as object[] } : {}),
         },
         include: {
           client: { select: { id: true, name: true, email: true } },

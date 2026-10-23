@@ -30,6 +30,15 @@ model Invoice {
   dueDate        DateTime
   status         InvoiceStatus @default(DRAFT)
 
+  // [{ description, quantity, rate, unit? }] as entered on Create Invoice.
+  // Null for older invoices; their emails show the description and total.
+  lineItems      Json?
+
+  // Invoice email workflow (see src/lib/invoice-email.ts). Status changes to
+  // SENT only once Zapier accepts the email.
+  emailState     InvoiceEmailState?
+  emailStateAt   DateTime?
+
   // PayPal payment tracking
   paypalOrderId   String?      @unique
   paypalCaptureId String?      @unique
@@ -41,6 +50,12 @@ model Invoice {
 
   @@index([clientId])
   @@index([status, dueDate])
+}
+
+enum InvoiceEmailState {
+  SENDING // claimed; the Zapier request is in progress
+  UNKNOWN // Zapier timed out — the email may or may not have been sent
+  ACCEPTED // Zapier accepted the email (Gmail delivery happens in the Zap)
 }
 
 enum InvoiceStatus {

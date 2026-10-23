@@ -1,7 +1,8 @@
 /**
  * Shared ClearCollect UI primitives (compact dashboard design system).
- * Colors come from the tokens in globals.css: brand #0966D8, navy #07145B,
- * canvas #F5F6F8, line #E6E8EE. Cards use the `card` utility.
+ * Colors come from the tokens in globals.css (brand, navy, canvas, surface,
+ * line, muted), which switch with the light/dark theme. Use bg-surface for
+ * white surfaces. Cards use the `card` utility.
  */
 
 import type { ReactNode } from "react";
@@ -10,12 +11,12 @@ export const btnPrimary =
   "inline-flex items-center justify-center gap-1.5 rounded-lg bg-brand px-3.5 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-brand-dark disabled:cursor-not-allowed disabled:opacity-50";
 
 export const btnSecondary =
-  "inline-flex items-center justify-center gap-1.5 rounded-lg border border-line bg-white px-3.5 py-2 text-[13px] font-semibold text-navy transition-colors hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-50";
+  "inline-flex items-center justify-center gap-1.5 rounded-lg border border-line bg-surface px-3.5 py-2 text-[13px] font-semibold text-navy transition-colors hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-50";
 
-export const linkAction = "text-xs font-semibold text-brand hover:text-brand-dark";
+export const linkAction = "text-xs font-semibold text-brand hover:text-brand-ink";
 
 export const inputClass =
-  "w-full rounded-lg border border-line bg-white px-3 py-2 text-[13px] text-navy placeholder:text-slate-400 outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/15";
+  "w-full rounded-lg border border-line bg-surface px-3 py-2 text-[13px] text-navy placeholder:text-slate-400 outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/15";
 
 export const labelClass = "mb-1 block text-xs font-medium text-muted";
 
@@ -92,7 +93,7 @@ export function Avatar({ name, index = 0, size = "h-8 w-8" }: { name: string; in
 
 export function Notice({ tone = "info", children }: { tone?: "info" | "error" | "success" | "warning"; children: ReactNode }) {
   const tones = {
-    info: "bg-brand-50 text-brand-dark border-brand-100",
+    info: "bg-brand-50 text-brand-ink border-brand-100",
     error: "bg-red-50 text-red-700 border-red-100",
     success: "bg-emerald-50 text-emerald-700 border-emerald-100",
     warning: "bg-amber-50 text-amber-800 border-amber-100",

@@ -13,6 +13,9 @@ import {
   type DateSource,
   type LineUnit,
 } from "@/lib/invoice-draft";
+import { lineItemCents } from "@/lib/line-items";
+import { SendInvoiceButton } from "@/components/SendInvoice";
+import { btnPrimary } from "@/components/ui";
 
 type Client = {
   id: number;
@@ -100,11 +103,12 @@ const getServerToday = () => "";
 
 /** Line amount in integer cents (same rounding as the server). */
 function lineCents(item: LineItem) {
-  return Math.round((Math.round(item.quantity * 100) * Math.round(item.rate * 100)) / 100);
+  return lineItemCents(item);
 }
 
 // Static preview text only. Real reminders are drafted, approved, and sent
-// from the Follow-ups page (Zapier → Gmail); this page never sends email.
+// from the Follow-ups page (Zapier → Gmail). The only email this page sends
+// is the invoice itself, via SendInvoiceButton (POST /api/invoices/[id]/send).
 const sampleReminderSubject = "Friendly Payment Reminder";
 
 const sampleReminder = `Hi Sarah,
@@ -161,6 +165,9 @@ export default function CreateInvoicePage() {
   const [isSaving, setIsSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState("");
   const [saveError, setSaveError] = useState(false);
+  // The last draft saved from this page; "Send Invoice" emails this saved
+  // record (never unsaved form values). A failed send leaves it a DRAFT.
+  const [savedDraft, setSavedDraft] = useState<{ id: number; invoiceNumber: string; clientEmail: string | null } | null>(null);
 
   const subtotal =
     lineItems.reduce((sum, item) => sum + lineCents(item), 0) / 100;
@@ -361,10 +368,17 @@ export default function CreateInvoicePage() {
           issueDate,
           dueDate,
           status: "DRAFT",
+          // Stored so the invoice email can list them; must add up to amount.
+          lineItems: lineItems.map((item) => ({
+            description: item.description.trim(),
+            quantity: item.quantity,
+            rate: item.rate,
+            ...(item.unit ? { unit: item.unit } : {}),
+          })),
         }),
       });
 
-      const result: ApiResponse<{ invoiceNumber: string }> = await response.json();
+      const result: ApiResponse<{ id: number; invoiceNumber: string; client: { email: string | null } }> = await response.json();
 
       if (!response.ok || !result.ok) {
         const message =
@@ -380,6 +394,9 @@ export default function CreateInvoicePage() {
           ? `Draft ${result.data.invoiceNumber} saved successfully to the database!`
           : "Draft saved successfully to the database!"
       );
+      if (result.data) {
+        setSavedDraft({ id: result.data.id, invoiceNumber: result.data.invoiceNumber, clientEmail: result.data.client?.email ?? null });
+      }
       // Leave the field blank so the next save gets a fresh number.
       setInvoiceNumber("");
     } catch (error) {
@@ -392,12 +409,6 @@ export default function CreateInvoicePage() {
     } finally {
       setIsSaving(false);
     }
-  }
-
-  function handleSendInvoice() {
-    alert(
-      "Sending invoices is not connected yet. Your draft can be saved to the database."
-    );
   }
 
   const allAnswered = questions.length > 0 && questions.every((q) => (answers[q.id] ?? "").trim());
@@ -455,9 +466,9 @@ export default function CreateInvoicePage() {
           Create Invoice
         </h1>
         <p className="text-muted text-[13px] mt-0.5">
-          Create an invoice for your client and save it as a draft. Payment
-          reminders are sent from{" "}
-          <Link href="/follow-ups" className="font-medium text-brand hover:text-brand-dark">
+          Create an invoice, save it as a draft, then send it to your client by
+          email. Payment reminders are sent from{" "}
+          <Link href="/follow-ups" className="font-medium text-brand hover:text-brand-ink">
             Follow-ups
           </Link>
           .
@@ -699,7 +710,7 @@ export default function CreateInvoicePage() {
               <button
                 type="button"
                 onClick={addLineItem}
-                className="text-sm font-medium text-brand hover:text-brand-dark"
+                className="text-sm font-medium text-brand hover:text-brand-ink"
               >
                 + Add line item
               </button>
@@ -793,27 +804,30 @@ export default function CreateInvoicePage() {
                 {isSaving ? "Saving..." : "Save Draft"}
               </button>
 
-              <button
-                id="send-invoice-btn"
-                onClick={handleSendInvoice}
-                className="flex items-center gap-2 bg-brand hover:bg-brand-dark text-white text-[13px] font-semibold px-3.5 py-2 rounded-lg transition-colors"
-              >
-                <svg
-                  className="w-4 h-4"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                  strokeWidth={2}
+              {savedDraft ? (
+                <SendInvoiceButton
+                  key={savedDraft.id}
+                  invoiceId={savedDraft.id}
+                  invoiceNumber={savedDraft.invoiceNumber}
+                  label={`Send ${savedDraft.invoiceNumber}`}
+                />
+              ) : (
+                <button
+                  id="send-invoice-btn"
+                  type="button"
+                  disabled
+                  title="Save the draft first"
+                  className={btnPrimary}
                 >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"
-                  />
-                </svg>
-                Send Invoice (Demo)
-              </button>
+                  Send Invoice
+                </button>
+              )}
             </div>
+            <p className="mt-2 text-right text-[11px] text-muted">
+              {savedDraft
+                ? `Sends the saved draft ${savedDraft.invoiceNumber} (not later edits) to ${savedDraft.clientEmail || "the client's saved email"} after you review it.`
+                : "Save the draft first. Sending emails the saved invoice to the client's email on file."}
+            </p>
           </div>
         </div>
 
@@ -873,7 +887,7 @@ export default function CreateInvoicePage() {
                 aria-live="polite"
                 className={`mt-2.5 rounded-lg px-3 py-2 text-xs ${aiError
                     ? "bg-red-50 text-red-700 ring-1 ring-red-200"
-                    : "bg-brand-50 text-brand-dark ring-1 ring-brand-100"
+                    : "bg-brand-50 text-brand-ink ring-1 ring-brand-100"
                   }`}
               >
                 {aiMessage}
@@ -907,7 +921,7 @@ export default function CreateInvoicePage() {
                         maxLength={question.field ? 200 : 500}
                         placeholder={question.field === "rate" ? "e.g. 6" : question.field === "quantity" ? "e.g. 3" : "Your answer"}
                         aria-invalid={question.problem ? true : undefined}
-                        className={`mt-1 w-full rounded-lg border bg-white px-2 py-1.5 text-xs text-navy focus:outline-none focus:ring-2 focus:ring-amber-300 ${question.problem ? "border-red-300" : "border-amber-200"}`}
+                        className={`mt-1 w-full rounded-lg border bg-surface px-2 py-1.5 text-xs text-navy focus:outline-none focus:ring-2 focus:ring-amber-300 ${question.problem ? "border-red-300" : "border-amber-200"}`}
                       />
                       {question.problem && <p className="mt-0.5 text-[11px] font-medium text-red-700">{question.problem}</p>}
                     </div>
@@ -917,7 +931,7 @@ export default function CreateInvoicePage() {
                   type="button"
                   onClick={handleClarify}
                   disabled={isGenerating || !allAnswered}
-                  className="mt-2 w-full rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="mt-2 w-full rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700 dark:bg-amber-500 dark:text-slate-950 dark:hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {pendingDraft ? "Apply answers" : "Add answers and regenerate"}
                 </button>
@@ -958,9 +972,9 @@ export default function CreateInvoicePage() {
             </div>
 
             <p className="text-muted text-xs mb-2.5">
-              Sample wording only. No email is sent from this page. To send a real
-              reminder for a saved, unpaid invoice, use Follow-ups: you review an AI
-              draft, approve it, and it is handed to Zapier for Gmail delivery.
+              Sample wording only. This reminder preview never sends anything. To
+              send a real reminder for a saved, unpaid invoice, use Follow-ups: you
+              review an AI draft, approve it, and it is handed to Zapier for Gmail delivery.
             </p>
 
             {/* Subject is its own field so it is always visible; the body scrolls. */}
@@ -971,7 +985,7 @@ export default function CreateInvoicePage() {
               id="reminder-subject"
               value={reminderSubject}
               onChange={(e) => setReminderSubject(e.target.value)}
-              className="w-full border border-line rounded-lg px-3 py-2 text-xs font-semibold text-navy focus:outline-none focus:ring-2 focus:ring-brand/20 focus:border-brand transition bg-white"
+              className="w-full border border-line rounded-lg px-3 py-2 text-xs font-semibold text-navy focus:outline-none focus:ring-2 focus:ring-brand/20 focus:border-brand transition bg-surface"
             />
             <label htmlFor="reminder-textarea" className="block text-xs font-medium text-muted mt-2 mb-1">
               Message

@@ -7,6 +7,7 @@
  */
 
 import { InvoiceStatus } from "@/generated/prisma/enums";
+import { lineItemsTotalCents, validateLineItems, type StoredLineItem } from "@/lib/line-items";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -104,6 +105,8 @@ export interface CreateInvoiceInput {
   issueDate: Date;
   dueDate: Date;
   status: InvoiceStatus;
+  /** Optional; when given, the items must add up to `amount` exactly. */
+  lineItems: StoredLineItem[] | null;
 }
 
 export function validateCreateInvoice(
@@ -186,6 +189,19 @@ export function validateCreateInvoice(
     });
   }
 
+  // lineItems — optional; stored so the invoice email can list them
+  let lineItems: StoredLineItem[] | null = null;
+  if (b["lineItems"] !== undefined && b["lineItems"] !== null) {
+    const items = validateLineItems(b["lineItems"]);
+    if (!items.ok) {
+      errors.push(...items.errors);
+    } else if (typeof amount === "number" && lineItemsTotalCents(items.data) !== Math.round(amount * 100)) {
+      errors.push({ field: "lineItems", message: "line items must add up to the invoice amount" });
+    } else {
+      lineItems = items.data;
+    }
+  }
+
   if (errors.length > 0) return { ok: false, errors };
 
   return {
@@ -199,6 +215,7 @@ export function validateCreateInvoice(
       issueDate: issueDateObj!,
       dueDate: dueDateObj!,
       status: resolvedStatus,
+      lineItems,
     },
   };
 }

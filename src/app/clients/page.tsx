@@ -414,7 +414,7 @@ export default function ClientsPage() {
 
                   <Link
                     href="/create-invoice"
-                    className="text-brand hover:text-brand-dark font-medium transition-colors whitespace-nowrap"
+                    className="text-brand hover:text-brand-ink font-medium transition-colors whitespace-nowrap"
                   >
                     + Invoice
                   </Link>
@@ -439,7 +439,7 @@ export default function ClientsPage() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="add-client-title"
-            className="w-full max-w-md rounded-lg bg-white p-5 shadow-xl"
+            className="w-full max-w-md rounded-lg bg-surface p-5 shadow-xl"
           >
             <div className="mb-4 flex items-center justify-between">
               <div>

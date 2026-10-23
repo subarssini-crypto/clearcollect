@@ -10,14 +10,18 @@
  *   secret token. Without configuration the app stays in demo mode and never
  *   claims a reminder was sent. A 2xx from Zapier only means Zapier accepted
  *   the reminder — the email/Slack step runs inside the Zap.
+ * - A timeout is reported as "unknown", not "not sent", and a guard refuses a
+ *   second send for the same invoice shortly after a handoff (no duplicates).
  */
 
 import { prisma } from "@/lib/prisma";
 import { generateGeminiJson } from "@/lib/ai-invoice";
+import { formatAmount, formatLongDate, getZapierConfig, postToZapier, validRecipient } from "@/lib/zapier";
+
+export { getZapierConfig, type ZapierConfig } from "@/lib/zapier";
 
 export const MAX_SUBJECT_LENGTH = 200;
 export const MAX_MESSAGE_LENGTH = 5000;
-const ZAPIER_TIMEOUT_MS = 10_000;
 
 export class FollowUpError extends Error {
   constructor(message: string, public status: number) {
@@ -80,15 +84,7 @@ export interface ReminderFacts {
 }
 
 export function reminderFacts(invoice: ReminderInvoice, now: number): ReminderFacts {
-  const amountNumber = Number(invoice.amount.toString());
-  let amount: string;
-  try {
-    amount = new Intl.NumberFormat("en-US", { style: "currency", currency: invoice.currency, currencyDisplay: "code" })
-      .format(amountNumber)
-      .replace(/ /g, " ");
-  } catch {
-    amount = `${invoice.currency} ${amountNumber.toFixed(2)}`;
-  }
+  const amount = formatAmount(invoice.amount, invoice.currency);
   const due = Date.UTC(invoice.dueDate.getUTCFullYear(), invoice.dueDate.getUTCMonth(), invoice.dueDate.getUTCDate());
   const nowDate = new Date(now);
   const today = Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth(), nowDate.getUTCDate());
@@ -96,11 +92,35 @@ export function reminderFacts(invoice: ReminderInvoice, now: number): ReminderFa
   return {
     invoiceNumber: invoice.invoiceNumber,
     amount,
-    dueDate: invoice.dueDate.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" }),
+    dueDate: formatLongDate(invoice.dueDate),
     clientName: invoice.client.name,
     daysOverdue: Math.max(0, -diff),
     daysUntilDue: Math.max(0, diff),
   };
+}
+
+/** INV-… references in `text` that are not `invoiceNumber` (case-insensitive). */
+export function otherInvoiceNumbers(text: string, invoiceNumber: string): string[] {
+  const own = invoiceNumber.toUpperCase();
+  return (text.match(/INV-[A-Z0-9]+(?:-[A-Z0-9]+)*/gi) ?? []).filter((ref) => ref.toUpperCase() !== own);
+}
+
+/**
+ * The approved text is user-edited, so before sending it must still name this
+ * invoice and must not name any other one (e.g. after copying another reminder).
+ */
+export function assertReminderMatchesInvoice(invoice: ReminderInvoice, input: SendReminderInput): void {
+  const text = `${input.subject}\n${input.message}`;
+  if (!text.toUpperCase().includes(invoice.invoiceNumber.toUpperCase())) {
+    throw new FollowUpError(`The reminder must mention invoice ${invoice.invoiceNumber}; nothing was sent`, 422);
+  }
+  const others = otherInvoiceNumbers(text, invoice.invoiceNumber);
+  if (others.length > 0) {
+    throw new FollowUpError(
+      `The reminder mentions ${others[0]}, but it is for invoice ${invoice.invoiceNumber}; nothing was sent`,
+      422
+    );
+  }
 }
 
 const PLACEHOLDERS = {
@@ -127,8 +147,7 @@ export function fillReminderTemplate(
   const subject = fill(draft.subject).trim();
   const message = fill(draft.message).trim();
 
-  const otherInvoiceRefs = (message.match(/INV-[A-Z0-9-]+/gi) ?? []).filter((ref) => ref !== facts.invoiceNumber);
-  if (otherInvoiceRefs.length > 0) {
+  if (otherInvoiceNumbers(message, facts.invoiceNumber).length > 0) {
     throw new FollowUpError("The AI draft referenced a different invoice; please try again", 502);
   }
   if (!subject || subject.length > MAX_SUBJECT_LENGTH || !message || message.length > MAX_MESSAGE_LENGTH) {
@@ -218,30 +237,7 @@ export function validateSendReminder(body: unknown): { ok: true; data: SendRemin
   return { ok: true, data: { invoiceId: b.invoiceId as number, subject, message } };
 }
 
-// ── Zapier delivery ───────────────────────────────────────────────────────────
-
-export type ZapierConfig =
-  | { state: "configured"; url: string; secret: string }
-  | { state: "demo" } // nothing configured
-  | { state: "misconfigured"; reason: string };
-
-export function getZapierConfig(env: Record<string, string | undefined> = process.env): ZapierConfig {
-  const url = env.ZAPIER_WEBHOOK_URL?.trim();
-  const secret = env.ZAPIER_WEBHOOK_SECRET?.trim();
-  if (!url && !secret) return { state: "demo" };
-  if (!url || !secret) return { state: "misconfigured", reason: "Both ZAPIER_WEBHOOK_URL and ZAPIER_WEBHOOK_SECRET must be set" };
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return { state: "misconfigured", reason: "ZAPIER_WEBHOOK_URL is not a valid URL" };
-  }
-  if (parsed.protocol !== "https:") return { state: "misconfigured", reason: "ZAPIER_WEBHOOK_URL must use https" };
-  if (secret.length < 16) return { state: "misconfigured", reason: "ZAPIER_WEBHOOK_SECRET must be at least 16 characters" };
-  return { state: "configured", url, secret };
-}
-
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// ── Zapier delivery (shared helpers in src/lib/zapier.ts) ────────────────────
 
 /**
  * The client email the reminder goes to. Zapier accepts a Catch Hook request
@@ -249,8 +245,8 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
  * otherwise the app would report success for an email that cannot be sent.
  */
 export function reminderRecipient(invoice: ReminderInvoice): string {
-  const email = invoice.client.email?.trim() ?? "";
-  if (!email || email.length > 191 || !EMAIL_PATTERN.test(email)) {
+  const email = validRecipient(invoice.client.email);
+  if (!email) {
     throw new FollowUpError(
       `${invoice.client.name} has no valid email address on file; add one on the Clients page before sending`,
       422
@@ -295,6 +291,46 @@ export type DeliveryResult =
   | { mode: "demo"; delivered: false; detail: string }
   | { mode: "zapier"; delivered: true; detail: string };
 
+/** How long after a handoff to Zapier another reminder for the same invoice is refused. */
+export const RESEND_COOLDOWN_MS = 10 * 60_000;
+
+/**
+ * Prevents duplicate reminder emails: one send per invoice at a time, and no
+ * second send within RESEND_COOLDOWN_MS of one Zapier accepted (or may have
+ * accepted, after a timeout). Kept in server memory, so it resets on restart
+ * and is per process — enough for this single-owner app.
+ */
+export class ReminderSendGuard {
+  private inFlight = new Set<number>();
+  private handedOff = new Map<number, number>();
+
+  begin(invoice: ReminderInvoice, now: number): void {
+    if (this.inFlight.has(invoice.id)) {
+      throw new FollowUpError(`A reminder for ${invoice.invoiceNumber} is already being sent`, 409);
+    }
+    const last = this.handedOff.get(invoice.id);
+    if (last !== undefined && now - last < RESEND_COOLDOWN_MS) {
+      const minutes = Math.max(1, Math.round((now - last) / 60_000));
+      throw new FollowUpError(
+        `A reminder for ${invoice.invoiceNumber} was handed to Zapier about ${minutes} minute(s) ago. ` +
+          `Check your Zap history before sending again (allowed after ${RESEND_COOLDOWN_MS / 60_000} minutes).`,
+        409
+      );
+    }
+    this.inFlight.add(invoice.id);
+  }
+
+  /** `handedOff`: Zapier accepted the reminder, or may have (timeout). */
+  finish(invoiceId: number, now: number, handedOff: boolean): void {
+    this.inFlight.delete(invoiceId);
+    if (handedOff) this.handedOff.set(invoiceId, now);
+  }
+}
+
+// Survives dev hot-reloads, like the Prisma client.
+const globalForGuard = globalThis as unknown as { reminderSendGuard?: ReminderSendGuard };
+const sharedGuard = (globalForGuard.reminderSendGuard ??= new ReminderSendGuard());
+
 /**
  * Delivers an approved reminder. Returns demo mode when Zapier is not
  * configured; throws FollowUpError unless Zapier confirms with a 2xx.
@@ -303,9 +339,10 @@ export async function deliverReminder(
   invoice: ReminderInvoice,
   input: SendReminderInput,
   now: number,
-  options: { env?: Record<string, string | undefined>; fetchImpl?: typeof fetch } = {}
+  options: { env?: Record<string, string | undefined>; fetchImpl?: typeof fetch; guard?: ReminderSendGuard } = {}
 ): Promise<DeliveryResult> {
   const recipientEmail = reminderRecipient(invoice);
+  assertReminderMatchesInvoice(invoice, input);
   const config = getZapierConfig(options.env);
   if (config.state === "demo") {
     return { mode: "demo", delivered: false, detail: "Demo mode: Zapier is not configured, so nothing was sent." };
@@ -315,24 +352,28 @@ export async function deliverReminder(
     throw new FollowUpError("Reminder delivery is misconfigured on the server; nothing was sent", 503);
   }
 
+  const guard = options.guard ?? sharedGuard;
+  guard.begin(invoice, now);
   const payload = buildZapierPayload(invoice, input, reminderFacts(invoice, now), config.secret, now, recipientEmail);
-  let response: Response;
-  try {
-    response = await (options.fetchImpl ?? fetch)(config.url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-ClearCollect-Token": config.secret },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(ZAPIER_TIMEOUT_MS),
-      cache: "no-store",
-    });
-  } catch (err) {
-    console.error("[follow-up] Zapier request failed", err instanceof Error ? err.name : "error");
+  const outcome = await postToZapier(config, payload, { fetchImpl: options.fetchImpl, logLabel: "follow-up" });
+  if (outcome.kind === "timeout") {
+    // The request may have reached Zapier before the timeout, and the Zap
+    // may have sent the email — never report that as "not sent".
+    guard.finish(invoice.id, now, true);
+    throw new FollowUpError(
+      "Zapier did not respond in time, so it is unknown whether the reminder was sent. Check your Zap history before sending again.",
+      504
+    );
+  }
+  if (outcome.kind === "unreachable") {
+    guard.finish(invoice.id, now, false);
     throw new FollowUpError("Could not reach Zapier; the reminder was not sent", 502);
   }
-  if (!response.ok) {
-    console.error(`[follow-up] Zapier responded ${response.status}`);
-    throw new FollowUpError(`Zapier rejected the reminder (HTTP ${response.status}); it was not sent`, 502);
+  if (outcome.kind === "rejected") {
+    guard.finish(invoice.id, now, false);
+    throw new FollowUpError(`Zapier rejected the reminder (HTTP ${outcome.status}); it was not sent`, 502);
   }
+  guard.finish(invoice.id, now, true);
   return {
     mode: "zapier",
     delivered: true,

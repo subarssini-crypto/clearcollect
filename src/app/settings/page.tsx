@@ -42,7 +42,7 @@ export default function SettingsPage() {
               <p className="text-[13px] font-medium text-navy">Profile photo</p>
               <button
                 id="change-photo-btn"
-                className="text-brand hover:text-brand-dark text-xs mt-0.5 transition-colors"
+                className="text-brand hover:text-brand-ink text-xs mt-0.5 transition-colors"
               >
                 Change photo (demo)
               </button>
@@ -98,7 +98,7 @@ export default function SettingsPage() {
                 id="settings-currency"
                 value={currency}
                 onChange={(e) => setCurrency(e.target.value)}
-                className="w-full border border-line rounded-lg px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-brand/20 focus:border-brand transition bg-white"
+                className="w-full border border-line rounded-lg px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-brand/20 focus:border-brand transition bg-surface"
               >
                 <option value="USD">USD — US Dollar</option>
                 <option value="EUR">EUR — Euro</option>
@@ -116,7 +116,7 @@ export default function SettingsPage() {
                 id="settings-terms"
                 value={paymentTerms}
                 onChange={(e) => setPaymentTerms(e.target.value)}
-                className="w-full border border-line rounded-lg px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-brand/20 focus:border-brand transition bg-white"
+                className="w-full border border-line rounded-lg px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-brand/20 focus:border-brand transition bg-surface"
               >
                 <option value="7">Net 7 days</option>
                 <option value="14">Net 14 days</option>

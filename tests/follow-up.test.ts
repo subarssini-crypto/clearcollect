@@ -9,6 +9,9 @@ import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import {
   FollowUpError,
+  RESEND_COOLDOWN_MS,
+  ReminderSendGuard,
+  assertReminderMatchesInvoice,
   assertRemindable,
   buildZapierPayload,
   deliverReminder,
@@ -192,19 +195,35 @@ describe("deliverReminder", () => {
 
   test("Zapier error response is reported as not sent", async () => {
     const f = fakeFetch(async () => new Response("bad", { status: 500 }));
-    await assert.rejects(deliverReminder(invoice(), input, NOW, { env: ZAPIER_ENV, fetchImpl: f.impl }), expectFollowUpError(502));
+    await assert.rejects(deliverReminder(invoice(), input, NOW, { env: ZAPIER_ENV, fetchImpl: f.impl, guard: new ReminderSendGuard() }), expectFollowUpError(502));
   });
 
-  test("network failure or timeout is reported as not sent", async () => {
+  test("connection failure is reported as not sent", async () => {
+    const f = fakeFetch(async () => {
+      throw new TypeError("fetch failed");
+    });
+    await assert.rejects(
+      deliverReminder(invoice(), input, NOW, { env: ZAPIER_ENV, fetchImpl: f.impl, guard: new ReminderSendGuard() }),
+      (err: unknown) => expectFollowUpError(502)(err) && /not sent/.test((err as Error).message)
+    );
+  });
+
+  test("timeout is reported as unknown (504), never as not sent", async () => {
     const f = fakeFetch(async () => {
       throw Object.assign(new Error("timed out"), { name: "TimeoutError" });
     });
-    await assert.rejects(deliverReminder(invoice(), input, NOW, { env: ZAPIER_ENV, fetchImpl: f.impl }), expectFollowUpError(502));
+    await assert.rejects(
+      deliverReminder(invoice(), input, NOW, { env: ZAPIER_ENV, fetchImpl: f.impl, guard: new ReminderSendGuard() }),
+      (err: unknown) =>
+        expectFollowUpError(504)(err) &&
+        /unknown whether/.test((err as Error).message) &&
+        !/not sent/.test((err as Error).message)
+    );
   });
 
   test("success only when Zapier confirms; sends the token and invoice facts", async () => {
     const f = fakeFetch(async () => new Response(JSON.stringify({ status: "success" }), { status: 200 }));
-    const result = await deliverReminder(invoice(), input, NOW, { env: ZAPIER_ENV, fetchImpl: f.impl });
+    const result = await deliverReminder(invoice(), input, NOW, { env: ZAPIER_ENV, fetchImpl: f.impl, guard: new ReminderSendGuard() });
     assert.equal(result.mode, "zapier");
     assert.equal(result.delivered, true);
     assert.ok(!JSON.stringify(result).includes(SECRET), "result must not expose the secret");
@@ -229,9 +248,80 @@ describe("deliverReminder", () => {
   test("missing recipient email: rejected before any request, even when configured", async () => {
     const f = fakeFetch(async () => new Response("ok"));
     const noEmail = invoice({ client: { id: 1, name: "Acme", email: null, company: null } });
-    await assert.rejects(deliverReminder(noEmail, input, NOW, { env: ZAPIER_ENV, fetchImpl: f.impl }), expectFollowUpError(422));
+    await assert.rejects(deliverReminder(noEmail, input, NOW, { env: ZAPIER_ENV, fetchImpl: f.impl, guard: new ReminderSendGuard() }), expectFollowUpError(422));
     await assert.rejects(deliverReminder(noEmail, input, NOW, { env: {}, fetchImpl: f.impl }), expectFollowUpError(422));
     assert.equal(f.calls.length, 0);
+  });
+
+  test("approved text must name this invoice and no other; checked before any request", async () => {
+    const f = fakeFetch(async () => new Response("ok"));
+    const opts = { env: ZAPIER_ENV, fetchImpl: f.impl, guard: new ReminderSendGuard() };
+    const missing = { ...input, subject: "Payment reminder", message: "Please pay soon." };
+    await assert.rejects(deliverReminder(invoice(), missing, NOW, opts), expectFollowUpError(422));
+    const wrong = { ...input, message: "Please pay INV-2026-042 and INV-2026-041." };
+    await assert.rejects(deliverReminder(invoice(), wrong, NOW, opts), expectFollowUpError(422));
+    // Also enforced in demo mode, so a demo run shows the same error.
+    await assert.rejects(deliverReminder(invoice(), missing, NOW, { ...opts, env: {} }), expectFollowUpError(422));
+    assert.equal(f.calls.length, 0);
+  });
+
+  test("invoice number in the subject only is enough, and matching is case-insensitive", () => {
+    assert.doesNotThrow(() =>
+      assertReminderMatchesInvoice(invoice(), { ...input, subject: "Reminder: inv-2026-042", message: "Please pay." })
+    );
+    assert.doesNotThrow(() =>
+      assertReminderMatchesInvoice(invoice(), { ...input, message: "Invoice INV-2026-042, due soon. Thanks!" })
+    );
+  });
+
+  test("duplicate sends: a concurrent second send is refused while the first is in flight", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const f = fakeFetch(async () => {
+      await gate;
+      return new Response("ok");
+    });
+    const opts = { env: ZAPIER_ENV, fetchImpl: f.impl, guard: new ReminderSendGuard() };
+    const first = deliverReminder(invoice(), input, NOW, opts);
+    await assert.rejects(deliverReminder(invoice(), input, NOW, opts), expectFollowUpError(409));
+    release();
+    assert.equal((await first).delivered, true);
+    assert.equal(f.calls.length, 1);
+  });
+
+  test("duplicate sends: refused within the cooldown after success or timeout, allowed after", async () => {
+    const ok = fakeFetch(async () => new Response("ok"));
+    const guard = new ReminderSendGuard();
+    const opts = { env: ZAPIER_ENV, fetchImpl: ok.impl, guard };
+    await deliverReminder(invoice(), input, NOW, opts);
+    await assert.rejects(deliverReminder(invoice(), input, NOW + 60_000, opts), expectFollowUpError(409));
+    // Other invoices are unaffected.
+    const other = invoice({ id: 43, invoiceNumber: "INV-2026-043" });
+    await deliverReminder(other, { ...input, invoiceId: 43, subject: "Reminder: INV-2026-043", message: "Please pay." }, NOW, opts);
+    assert.equal((await deliverReminder(invoice(), input, NOW + RESEND_COOLDOWN_MS, opts)).delivered, true);
+    assert.equal(ok.calls.length, 3);
+
+    const timeout = fakeFetch(async () => {
+      throw Object.assign(new Error("timed out"), { name: "TimeoutError" });
+    });
+    const tGuard = new ReminderSendGuard();
+    await assert.rejects(deliverReminder(invoice(), input, NOW, { ...opts, fetchImpl: timeout.impl, guard: tGuard }), expectFollowUpError(504));
+    await assert.rejects(deliverReminder(invoice(), input, NOW + 1000, { ...opts, guard: tGuard }), expectFollowUpError(409));
+  });
+
+  test("duplicate guard does not block a retry after a definite failure", async () => {
+    const guard = new ReminderSendGuard();
+    const bad = fakeFetch(async () => new Response("bad", { status: 500 }));
+    await assert.rejects(deliverReminder(invoice(), input, NOW, { env: ZAPIER_ENV, fetchImpl: bad.impl, guard }), expectFollowUpError(502));
+    const ok = fakeFetch(async () => new Response("ok"));
+    assert.equal((await deliverReminder(invoice(), input, NOW + 1000, { env: ZAPIER_ENV, fetchImpl: ok.impl, guard })).delivered, true);
+  });
+
+  test("demo mode is never blocked by the duplicate guard", async () => {
+    const guard = new ReminderSendGuard();
+    for (let i = 0; i < 2; i++) {
+      assert.equal((await deliverReminder(invoice(), input, NOW, { env: {}, guard })).mode, "demo");
+    }
   });
 
   test("payload never includes payment identifiers", () => {

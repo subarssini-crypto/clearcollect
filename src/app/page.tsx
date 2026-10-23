@@ -91,8 +91,8 @@ function Sparkline({ values }: { values: number[] }) {
   const pts = values.map((v, i) => `${(i / Math.max(values.length - 1, 1)) * 100},${36 - (v / max) * 32}`);
   return (
     <svg viewBox="0 0 100 38" preserveAspectRatio="none" className="h-8 w-full" aria-hidden="true">
-      <polygon points={`0,38 ${pts.join(" ")} 100,38`} fill="#0966D8" fillOpacity="0.08" />
-      <polyline points={pts.join(" ")} fill="none" stroke="#0966D8" strokeWidth={2} vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
+      <polygon points={`0,38 ${pts.join(" ")} 100,38`} fill="var(--color-brand)" fillOpacity="0.08" />
+      <polyline points={pts.join(" ")} fill="none" stroke="var(--color-brand)" strokeWidth={2} vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -304,7 +304,7 @@ function DueList({
             const d = describe(days);
             return (
               <li key={invoice.id} className="flex items-center gap-2.5 rounded-lg px-2 py-1.5 hover:bg-canvas">
-                <div className="flex h-8 w-8 flex-shrink-0 flex-col items-center justify-center rounded-md border border-line bg-white">
+                <div className="flex h-8 w-8 flex-shrink-0 flex-col items-center justify-center rounded-md border border-line bg-surface">
                   <span className="text-[9px] font-semibold uppercase leading-none text-muted">
                     {new Date(`${invoice.dueDate.slice(0, 10)}T00:00:00Z`).toLocaleDateString("en-US", { month: "short", timeZone: "UTC" })}
                   </span>
@@ -357,17 +357,17 @@ function Skeleton() {
     <div className="grid gap-5 xl:grid-cols-[minmax(0,7fr)_minmax(0,3fr)]" aria-busy="true" aria-label="Loading dashboard">
       <div className="space-y-4">
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          <div className="h-48 animate-pulse rounded-xl bg-white" />
-          <div className="h-48 animate-pulse rounded-xl bg-white" />
+          <div className="h-48 animate-pulse rounded-xl bg-surface" />
+          <div className="h-48 animate-pulse rounded-xl bg-surface" />
         </div>
         <div className="grid gap-4 md:grid-cols-[2fr_3fr]">
-          <div className="h-44 animate-pulse rounded-xl bg-white" />
-          <div className="h-44 animate-pulse rounded-xl bg-white" />
+          <div className="h-44 animate-pulse rounded-xl bg-surface" />
+          <div className="h-44 animate-pulse rounded-xl bg-surface" />
         </div>
-        <div className="h-64 animate-pulse rounded-xl bg-white" />
+        <div className="h-64 animate-pulse rounded-xl bg-surface" />
       </div>
       <div className="space-y-4 xl:border-l xl:border-line xl:pl-5">
-        {[0, 1, 2, 3].map((i) => <div key={i} className="h-32 animate-pulse rounded-xl bg-white" />)}
+        {[0, 1, 2, 3].map((i) => <div key={i} className="h-32 animate-pulse rounded-xl bg-surface" />)}
       </div>
     </div>
   );

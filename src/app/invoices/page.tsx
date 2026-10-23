@@ -3,6 +3,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { SendInvoiceButton } from "@/components/SendInvoice";
 
 type Invoice = {
   id: number;
@@ -176,11 +177,26 @@ export default function InvoicesPage() {
     return getDisplayStatus(invoice) === activeTab;
   });
 
-  // Payment column: Pay button for payable invoices, a PayPal badge when a
-  // capture is recorded, otherwise a neutral dash (no payment data is invented).
+  // The invoice is SENT once Zapier accepted its email (reload to see server state).
+  function markSent(id: number) {
+    setInvoices((current) => current.map((inv) => (inv.id === id ? { ...inv, status: "SENT" } : inv)));
+  }
+
+  // Action column: Send for drafts, Pay button for payable invoices, a PayPal
+  // badge when a capture is recorded, otherwise a neutral dash (no payment
+  // data is invented).
   function renderPayment(invoice: Invoice) {
     return (
       <>
+                        {invoice.status === "DRAFT" && (
+                          <SendInvoiceButton
+                            invoiceId={invoice.id}
+                            invoiceNumber={invoice.invoiceNumber}
+                            onSent={() => markSent(invoice.id)}
+                            label="Send"
+                            className="text-xs font-semibold px-3 py-1.5 rounded-lg border border-brand text-brand hover:bg-brand-50 transition-colors disabled:opacity-50"
+                          />
+                        )}
                         {(invoice.status === "SENT" || invoice.status === "OVERDUE") && (
                           <button
                             id={`pay-paypal-${invoice.id}`}
@@ -202,7 +218,7 @@ export default function InvoicesPage() {
                             PayPal
                           </span>
                         )}
-                        {!(invoice.status === "SENT" || invoice.status === "OVERDUE") &&
+                        {!(invoice.status === "SENT" || invoice.status === "OVERDUE" || invoice.status === "DRAFT") &&
                           !(invoice.status === "PAID" && invoice.paypalCaptureId) && (
                             <span className="text-muted" aria-label="No payment method recorded">
                               —
@@ -271,7 +287,7 @@ export default function InvoicesPage() {
             onClick={() => setActiveTab(tab)}
             aria-pressed={activeTab === tab}
             className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${activeTab === tab
-                ? "bg-white text-navy shadow-sm"
+                ? "bg-surface text-navy shadow-sm"
                 : "text-muted hover:text-slate-700"
               }`}
           >
@@ -330,7 +346,7 @@ export default function InvoicesPage() {
                     Status
                   </th>
                   <th className="text-right px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted hidden sm:table-cell">
-                    Payment
+                    Action
                   </th>
                 </tr>
               </thead>
@@ -393,6 +409,7 @@ export default function InvoicesPage() {
                         {/* Small screens: payment indicator sits under the status (column hidden). */}
                         {(invoice.status === "SENT" ||
                           invoice.status === "OVERDUE" ||
+                          invoice.status === "DRAFT" ||
                           (invoice.status === "PAID" && invoice.paypalCaptureId)) && (
                           <div className="mt-1 sm:hidden">{renderPayment(invoice)}</div>
                         )}

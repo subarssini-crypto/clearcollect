@@ -34,11 +34,28 @@ describe("Create Invoice reminder card is a preview only", () => {
     }
   });
 
-  test("says clearly that no email is sent and links to Follow-ups", () => {
+  test("says clearly that the reminder preview sends nothing and links to Follow-ups", () => {
     const text = visibleText(createInvoicePage);
     assert.match(text, /Preview only/);
-    assert.match(text, /No email is sent from this page/);
+    assert.match(text, /This reminder preview never sends anything/);
     assert.match(createInvoicePage, /href="\/follow-ups"/);
+  });
+
+  test("Send Invoice emails only a saved draft, never unsaved form values or a browser-chosen recipient", () => {
+    assert.doesNotMatch(createInvoicePage, /Send Invoice \(Demo\)|alert\(/);
+    assert.match(createInvoicePage, /<SendInvoiceButton[\s\S]*?invoiceId=\{savedDraft\.id\}/);
+    assert.match(createInvoicePage, /title="Save the draft first"/);
+    const sendComponent = readFileSync(new URL("../src/components/SendInvoice.tsx", import.meta.url), "utf8");
+    // The send request carries only the resend confirmation.
+    assert.match(sendComponent, /body: JSON\.stringify\(\{ confirmResend \}\)/);
+    assert.doesNotMatch(sendComponent, /JSON\.stringify\(\{[^}]*(recipient|email)/i);
+    assert.doesNotMatch(sendComponent, /hooks\.zapier\.com/);
+  });
+
+  test("saving stores line items and stays separate from sending", () => {
+    assert.match(createInvoicePage, /lineItems: lineItems\.map\(/);
+    assert.match(createInvoicePage, /status: "DRAFT"/);
+    assert.doesNotMatch(createInvoicePage, /\/api\/invoices\/\$\{[^}]+\}\/send/);
   });
 
   test("never calls the reminder delivery endpoint or Zapier itself", () => {
@@ -69,6 +86,120 @@ describe("Create Invoice reminder card is a preview only", () => {
 
   test("labels the default due date as an app default", () => {
     assert.match(visibleText(createInvoicePage), /App default: \$\{DEFAULT_DUE_DAYS\} days after the issue date \(not from your request\)/);
+  });
+});
+
+describe("Follow-ups page reports delivery honestly and blocks duplicate sends", () => {
+  const page = readFileSync(new URL("../src/app/follow-ups/page.tsx", import.meta.url), "utf8");
+
+  test("never assumes demo mode when the delivery status cannot be loaded", () => {
+    assert.doesNotMatch(page, /setDelivery\("demo"\)/);
+    assert.match(page, /setDelivery\("unknown"\)/);
+    assert.match(page, /delivery === "demo" \? "Approve & Send \(Demo\)" : "Approve & Send"/);
+  });
+
+  test("a sent reminder cannot be sent again, and double clicks are guarded synchronously", () => {
+    assert.match(page, /disabled=\{isBusy \|\| sent \|\| delivery === "misconfigured"\}/);
+    assert.match(page, /if \(sendingRef\.current\.has\(id\) \|\| sentIds\.has\(id\)\) return;/);
+  });
+
+  test("non-JSON error responses become readable errors", () => {
+    // The only direct res.json() call is inside the readJson helper.
+    assert.equal(page.match(/res\.json\(\)/g)?.length, 1);
+    assert.match(page, /return await res\.json\(\);\s*\} catch \{/);
+    assert.match(page, /unexpected response \(HTTP \$\{res\.status\}\)/);
+  });
+
+  test("the default reminder states the amount with its currency code", () => {
+    assert.match(page, /currencyDisplay: "code"/);
+    assert.match(page, /const amount = reminderAmount\(invoice\.amount, invoice\.currency\)/);
+  });
+});
+
+describe("light/dark theme", () => {
+  const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+  const layout = read("src/app/layout.tsx");
+  const toggle = read("src/components/ThemeToggle.tsx");
+  const shell = read("src/components/AppShell.tsx");
+  const css = read("src/app/globals.css");
+
+  test("the saved theme is applied by an inline <head> script before first paint", async () => {
+    assert.match(layout, /<head>\s*<script dangerouslySetInnerHTML=\{\{ __html: THEME_INIT_SCRIPT \}\} \/>/);
+    assert.match(layout, /suppressHydrationWarning/);
+    const { THEME_INIT_SCRIPT, THEME_STORAGE_KEY } = await import("@/lib/theme");
+    // Runs the script against a fake document: saved choice wins, else the OS preference.
+    for (const [saved, prefersDark, expected] of [["dark", false, "dark"], ["light", true, "light"], [null, true, "dark"], ["bogus", false, "light"]] as const) {
+      const attrs: Record<string, string> = {};
+      const env = {
+        localStorage: { getItem: (k: string) => (k === THEME_STORAGE_KEY ? saved : null) },
+        window: { matchMedia: () => ({ matches: prefersDark }) },
+        document: { documentElement: { setAttribute: (k: string, v: string) => (attrs[k] = v) } },
+      };
+      new Function("localStorage", "window", "document", THEME_INIT_SCRIPT)(env.localStorage, env.window, env.document);
+      assert.equal(attrs["data-theme"], expected, `saved=${saved} prefersDark=${prefersDark}`);
+    }
+  });
+
+  test("the toggle shows a moon in light mode and a sun in dark mode, with matching accessible labels", () => {
+    assert.match(toggle, /Light mode: moon — offers dark \*\/\}\s*<svg className="h-\[18px\] w-\[18px\] dark:hidden"/);
+    assert.match(toggle, /Dark mode: sun — offers light \*\/\}\s*<svg className="hidden h-\[18px\] w-\[18px\] dark:block"/);
+    assert.match(toggle, /<span className="sr-only dark:hidden">Switch to dark theme<\/span>/);
+    assert.match(toggle, /<span className="sr-only hidden dark:inline">Switch to light theme<\/span>/);
+    // Re-applied after React's dev remount, and persisted on click.
+    assert.match(toggle, /useLayoutEffect/);
+    assert.match(toggle, /saveTheme\(currentTheme\(\) === "dark" \? "light" : "dark"\)/);
+  });
+
+  test("the toggle is in the top navigation and on the login page", () => {
+    assert.equal(shell.match(/<ThemeToggle/g)?.length, 2);
+  });
+
+  test("dark mode is driven by data-theme, and the dark theme redefines the design tokens", () => {
+    assert.match(css, /@custom-variant dark \(&:where\(\[data-theme="dark"\], \[data-theme="dark"\] \*\)\);/);
+    const dark = css.slice(css.indexOf('[data-theme="dark"] {'));
+    for (const token of ["--color-surface", "--color-canvas", "--color-navy", "--color-line", "--color-muted", "--color-brand", "color-scheme: dark"]) {
+      assert.ok(dark.includes(token), `dark theme should set ${token}`);
+    }
+  });
+
+  test("native selects and their options get theme colors (readable dropdowns in dark mode)", () => {
+    const base = css.slice(css.indexOf("@layer base {"));
+    assert.match(base, /select \{\s*background-color: var\(--color-surface\);\s*color: var\(--color-navy\);/);
+    assert.match(base, /select option,\s*select optgroup \{\s*background-color: var\(--color-surface\);\s*color: var\(--color-navy\);/);
+    // Dark values for both tokens exist, so options are light text on a dark surface.
+    const dark = css.slice(css.indexOf('[data-theme="dark"] {'));
+    assert.match(dark, /--color-surface: #111a2e;/);
+    assert.match(dark, /--color-navy: #e6ebf5;/);
+  });
+
+  test("the send-invoice dialog is portaled and left-aligned regardless of where the button sits", () => {
+    const send = read("src/components/SendInvoice.tsx");
+    const invoices = read("src/app/invoices/page.tsx");
+    // The Invoices page renders the button inside a right-aligned, nowrap cell…
+    assert.match(invoices, /<td className="[^"]*text-right whitespace-nowrap[^"]*">\s*\{renderPayment\(invoice\)\}/);
+    // …so the dialog must not live under it, and resets alignment and wrapping itself.
+    assert.match(send, /\{open && createPortal\(/);
+    assert.match(send, /document\.body\s*\)\}/);
+    assert.match(send, /className="fixed inset-0 z-50 flex items-center justify-center [^"]*text-left whitespace-normal"/);
+    assert.match(send, /<pre className="[^"]*whitespace-pre-wrap/);
+  });
+
+  test("no page or component hard-codes white surfaces or hex colors", () => {
+    const files = [
+      ...readdirSync(new URL("../src/app", import.meta.url), { recursive: true, encoding: "utf8" })
+        .filter((f) => f.endsWith(".tsx"))
+        .map((f) => `src/app/${f.replace(/\\/g, "/")}`),
+      ...readdirSync(new URL("../src/components", import.meta.url)).map((f) => `src/components/${f}`),
+    ];
+    assert.ok(files.length >= 10);
+    for (const file of files) {
+      const source = read(file)
+        // Switch knobs stay white on both the brand and the dark track.
+        .replace(/rounded-full bg-white shadow transition-transform/g, "");
+      assert.doesNotMatch(source, /\bbg-white\b/, `${file} uses bg-white; use bg-surface`);
+      assert.doesNotMatch(source, /(fill|stroke|color|background)=["'{]+#[0-9a-f]{3,8}/i, `${file} hard-codes a hex color`);
+      assert.doesNotMatch(source, /text-brand-dark/, `${file} uses text-brand-dark; use text-brand-ink`);
+    }
   });
 });
 

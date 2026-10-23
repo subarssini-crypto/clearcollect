@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, type ReactNode } from "react";
+import ThemeToggle from "@/components/ThemeToggle";
 
 type NavItem = { href: string; label: string; icon: string[] };
 
@@ -56,7 +57,7 @@ function RailLink({ item, pathname }: { item: NavItem; pathname: string }) {
       }`}
     >
       <Icon paths={item.icon} />
-      <span className="pointer-events-none absolute left-full z-50 ml-2.5 whitespace-nowrap rounded-md bg-navy px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow transition-opacity group-hover:opacity-100">
+      <span className="pointer-events-none absolute left-full z-50 ml-2.5 whitespace-nowrap rounded-md bg-navy px-2 py-1 text-[11px] font-medium text-surface opacity-0 shadow transition-opacity group-hover:opacity-100">
         {item.label}
       </span>
     </Link>
@@ -79,14 +80,19 @@ export default function AppShell({ children }: { children: ReactNode }) {
 
   // The login page renders without app navigation.
   if (pathname === "/login") {
-    return <main className="h-full overflow-y-auto bg-canvas">{children}</main>;
+    return (
+      <main className="relative h-full overflow-y-auto bg-canvas">
+        <ThemeToggle className="absolute right-4 top-4 z-10" />
+        {children}
+      </main>
+    );
   }
 
   return (
     <div className="flex h-full flex-col bg-canvas">
       {/* Top navigation */}
-      <header className="relative z-40 flex h-14 flex-shrink-0 items-center border-b border-line bg-white px-4 sm:px-6">
-        <Link href="/" className="flex w-auto items-center gap-2 md:w-44" onClick={() => setMenuOpen(false)}>
+      <header className="relative z-40 flex h-14 flex-shrink-0 items-center border-b border-line bg-surface px-4 sm:px-6">
+        <Link href="/" className="flex w-auto items-center gap-2 md:w-44 lg:w-52" onClick={() => setMenuOpen(false)}>
           <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand">
             <svg className="h-4 w-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -114,14 +120,15 @@ export default function AppShell({ children }: { children: ReactNode }) {
           })}
         </nav>
 
-        <div className="ml-auto flex items-center justify-end gap-2 md:ml-0 md:w-44">
+        <div className="ml-auto flex items-center justify-end gap-2 md:ml-0 md:w-44 lg:w-52">
           <Link
             href="/create-invoice"
-            className="hidden items-center gap-1 rounded-full bg-brand px-3.5 py-1.5 text-[13px] font-semibold text-white transition-colors hover:bg-brand-dark sm:inline-flex"
+            className="hidden items-center gap-1 rounded-full bg-brand px-3.5 py-1.5 text-[13px] font-semibold text-white transition-colors hover:bg-brand-dark sm:inline-flex md:hidden lg:inline-flex"
           >
             <Icon paths={ICONS.create} className="h-3.5 w-3.5" />
             New invoice
           </Link>
+          <ThemeToggle />
           <button
             id="sign-out-btn"
             onClick={signOut}
@@ -146,7 +153,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
 
         {/* Mobile menu */}
         {menuOpen && (
-          <nav className="absolute inset-x-0 top-14 border-b border-line bg-white px-3 py-2 shadow-md md:hidden" aria-label="Mobile">
+          <nav className="absolute inset-x-0 top-14 border-b border-line bg-surface px-3 py-2 shadow-md md:hidden" aria-label="Mobile">
             {NAV.map((item) => {
               const active = isActive(pathname, item.href);
               return (
@@ -177,7 +184,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
 
       <div className="flex min-h-0 flex-1">
         {/* Narrow icon rail (tablet and up) */}
-        <aside className="hidden w-14 flex-shrink-0 flex-col items-center gap-1.5 border-r border-line bg-white py-3 md:flex" aria-label="Quick navigation">
+        <aside className="hidden w-14 flex-shrink-0 flex-col items-center gap-1.5 border-r border-line bg-surface py-3 md:flex" aria-label="Quick navigation">
           {NAV.slice(0, -1).map((item) => (
             <RailLink key={item.href} item={item} pathname={pathname} />
           ))}

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { displayStatus, type DashboardInvoice } from "@/lib/dashboard-metrics";
 import { Avatar, Notice, PageHeader, Page, btnPrimary, btnSecondary, inputClass } from "@/components/ui";
 
@@ -33,9 +33,20 @@ function longDate(value: string) {
   });
 }
 
+/** Amount with its currency code (e.g. "USD 1,830.00"), matching the server's reminder facts. */
+function reminderAmount(amount: string | number, currency: string) {
+  try {
+    return new Intl.NumberFormat("en-US", { style: "currency", currency, currencyDisplay: "code" })
+      .format(Number(amount))
+      .replace(/ /g, " ");
+  } catch {
+    return `${currency} ${Number(amount).toFixed(2)}`;
+  }
+}
+
 /** Reminder text built from the invoice record (editable before sending). */
 function draftReminder({ invoice, overdue, days }: FollowUp) {
-  const amount = money(invoice.amount, invoice.currency);
+  const amount = reminderAmount(invoice.amount, invoice.currency);
   const timing = overdue
     ? `was due on ${longDate(invoice.dueDate)} and is now ${days} day${days === 1 ? "" : "s"} overdue`
     : `is due on ${longDate(invoice.dueDate)}${days === 0 ? " (today)" : ` (in ${days} day${days === 1 ? "" : "s"})`}`;
@@ -52,7 +63,7 @@ async function loadInvoices(): Promise<DashboardInvoice[]> {
   const all: DashboardInvoice[] = [];
   for (let page = 1; ; page++) {
     const res = await fetch(`/api/invoices?limit=100&page=${page}`);
-    const json: ApiList<DashboardInvoice> = await res.json();
+    const json = await readJson<ApiList<DashboardInvoice>>(res);
     if (!res.ok || !json.ok || !json.data) throw new Error(json.error || "Could not load invoices.");
     all.push(...json.data);
     if (page >= (json.meta?.pages ?? 1)) break;
@@ -60,7 +71,16 @@ async function loadInvoices(): Promise<DashboardInvoice[]> {
   return all;
 }
 
-type Delivery = "zapier" | "demo" | "misconfigured";
+/** Parses a JSON response; an HTML error page (proxy, crash) becomes a readable error. */
+async function readJson<T>(res: Response): Promise<T & { error?: string; errors?: { message: string }[] }> {
+  try {
+    return await res.json();
+  } catch {
+    return { ok: false, error: `The server returned an unexpected response (HTTP ${res.status}).` } as never;
+  }
+}
+
+type Delivery = "zapier" | "demo" | "misconfigured" | "unknown";
 type Outcome = { tone: "success" | "info" | "error"; text: string };
 
 export default function FollowUpsPage() {
@@ -74,16 +94,21 @@ export default function FollowUpsPage() {
   const [outcomes, setOutcomes] = useState<Record<number, Outcome>>({});
   const [sentIds, setSentIds] = useState<Set<number>>(new Set());
   const [dismissedIds, setDismissedIds] = useState<Set<number>>(new Set());
+  // Synchronous guard: state updates land after a re-render, so a fast double
+  // click could otherwise start two sends.
+  const sendingRef = useRef<Set<number>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
     loadInvoices()
       .then((invoices) => !cancelled && setData({ invoices, now: Date.now() }))
       .catch((err) => !cancelled && setError(err instanceof Error ? err.message : "Could not load invoices."));
+    // If the mode cannot be checked, say so — never assume demo mode, since
+    // the server may still deliver for real.
     fetch("/api/follow-ups/status")
-      .then((res) => res.json())
-      .then((json: { ok: boolean; data?: { delivery: Delivery } }) => !cancelled && json.ok && json.data && setDelivery(json.data.delivery))
-      .catch(() => !cancelled && setDelivery("demo"));
+      .then((res) => readJson<{ ok: boolean; data?: { delivery: Delivery } }>(res))
+      .then((json) => !cancelled && setDelivery(json.ok && json.data ? json.data.delivery : "unknown"))
+      .catch(() => !cancelled && setDelivery("unknown"));
     return () => {
       cancelled = true;
     };
@@ -132,7 +157,7 @@ export default function FollowUpsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ invoiceId: id }),
       });
-      const json: { ok: boolean; data?: { subject: string; message: string }; error?: string } = await res.json();
+      const json = await readJson<{ ok: boolean; data?: { subject: string; message: string } }>(res);
       if (!res.ok || !json.ok || !json.data) throw new Error(json.error || "Could not draft a reminder.");
       const { subject, message } = json.data;
       setSubjects((prev) => ({ ...prev, [id]: subject }));
@@ -147,6 +172,8 @@ export default function FollowUpsPage() {
 
   async function sendReminder(item: FollowUp) {
     const id = item.invoice.id;
+    if (sendingRef.current.has(id) || sentIds.has(id)) return;
+    sendingRef.current.add(id);
     setBusy({ id, action: "send" });
     setOutcome(id, null);
     try {
@@ -155,12 +182,7 @@ export default function FollowUpsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ invoiceId: id, subject: subjectFor(item), message: messageFor(item) }),
       });
-      const json: {
-        ok: boolean;
-        data?: { mode: "demo" | "zapier"; delivered: boolean; detail: string };
-        error?: string;
-        errors?: { message: string }[];
-      } = await res.json();
+      const json = await readJson<{ ok: boolean; data?: { mode: "demo" | "zapier"; delivered: boolean; detail: string } }>(res);
       if (!res.ok || !json.ok || !json.data) {
         throw new Error(json.errors?.map((e) => e.message).join(" ") || json.error || "The reminder was not sent.");
       }
@@ -173,6 +195,7 @@ export default function FollowUpsPage() {
     } catch (err) {
       setOutcome(id, { tone: "error", text: err instanceof Error ? err.message : "The reminder was not sent." });
     } finally {
+      sendingRef.current.delete(id);
       setBusy(null);
     }
   }
@@ -182,8 +205,10 @@ export default function FollowUpsPage() {
       ? "Approved reminders are sent to Zapier, which delivers them by email or Slack."
       : delivery === "misconfigured"
         ? "Zapier delivery is misconfigured on the server — reminders cannot be sent."
-        : "Demo mode — Zapier is not configured, so reminders are not actually sent.";
-  const sendLabel = delivery === "zapier" ? "Approve & Send" : "Approve & Send (Demo)";
+        : delivery === "unknown"
+          ? "Could not check the delivery mode. The result of each send is shown after you approve it."
+          : "Demo mode — Zapier is not configured, so reminders are not actually sent.";
+  const sendLabel = delivery === "demo" ? "Approve & Send (Demo)" : "Approve & Send";
 
   return (
     <Page>
@@ -245,7 +270,7 @@ export default function FollowUpsPage() {
                     <button
                       id={`toggle-reminder-${id}`}
                       onClick={() => setOpenId(openId === id ? null : id)}
-                      className="text-xs font-semibold text-brand hover:text-brand-dark"
+                      className="text-xs font-semibold text-brand hover:text-brand-ink"
                     >
                       {openId === id ? "Hide Reminder" : "Review Reminder"}
                     </button>
@@ -301,10 +326,10 @@ export default function FollowUpsPage() {
                       <button
                         id={`send-followup-${id}`}
                         onClick={() => sendReminder(item)}
-                        disabled={isBusy || delivery === "misconfigured"}
+                        disabled={isBusy || sent || delivery === "misconfigured"}
                         className={`${btnPrimary} !px-3 !py-1.5 !text-xs`}
                       >
-                        {isBusy && busy?.action === "send" ? "Sending…" : sendLabel}
+                        {isBusy && busy?.action === "send" ? "Sending…" : sent ? "Sent to Zapier" : sendLabel}
                       </button>
                     </div>
                   </div>

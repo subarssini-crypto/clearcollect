@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+/* `dark:` utilities follow the data-theme attribute on <html> (set before
+   first paint by the inline script in app/layout.tsx), not the OS setting. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -7,14 +11,17 @@
   --font-mono: var(--font-geist-mono);
 }
 
-/* ClearCollect design tokens */
+/* ClearCollect design tokens (light theme). Utilities such as text-navy and
+   bg-surface read these variables, so the dark theme below only redefines them. */
 @theme {
   --color-brand: #0966d8; /* royal blue — primary actions, active states */
-  --color-brand-dark: #0753b0;
+  --color-brand-dark: #0753b0; /* hover background for brand buttons */
+  --color-brand-ink: #0753b0; /* strong brand text (links on hover, info notices) */
   --color-brand-50: #eaf2fd;
   --color-brand-100: #d3e4fa;
   --color-navy: #07145b; /* headings, key figures */
   --color-canvas: #f5f6f8; /* app background */
+  --color-surface: #ffffff; /* cards, header, inputs, dialogs */
   --color-line: #e6e8ee; /* card borders, dividers */
   --color-muted: #6b7280; /* secondary text */
 }
@@ -22,11 +29,109 @@
 :root {
   --background: #f5f6f8;
   --foreground: #07145b;
+  --card-shadow: 0 1px 2px rgb(7 20 91 / 0.04);
+  --scrollbar: #cfd4dc;
+  --scrollbar-hover: #9aa3b2;
+  color-scheme: light;
+}
+
+/* ── Dark theme ────────────────────────────────────────────────────────────
+   Dark navy/slate surfaces with the same blue accents. Tokens are redefined
+   rather than inverted, so every page that uses them follows automatically. */
+[data-theme="dark"] {
+  color-scheme: dark; /* native date pickers, selects, checkboxes, scrollbars */
+  --background: #0b1220;
+  --foreground: #e6ebf5;
+  --card-shadow: 0 1px 2px rgb(0 0 0 / 0.4);
+  --scrollbar: #334155;
+  --scrollbar-hover: #475569;
+
+  --color-brand: #3b86ee; /* white text keeps ~3.7:1; brand text on surface ~4.8:1 */
+  --color-brand-dark: #2a6fd1;
+  --color-brand-ink: #93c0fa;
+  --color-brand-50: rgb(59 134 238 / 0.14);
+  --color-brand-100: rgb(59 134 238 / 0.32);
+  --color-navy: #e6ebf5;
+  --color-canvas: #0b1220;
+  --color-surface: #111a2e;
+  --color-line: #26324a;
+  --color-muted: #9aa6ba;
+
+  /* Status and accent tints. Light-theme pages use pale backgrounds (50–200)
+     with dark text (600–900); in dark mode those become translucent tints
+     and light text of the same hue, so badges, notices, and avatars stay
+     readable without per-element overrides. 400/500 dots are unchanged. */
+  --color-slate-50: #172238;
+  --color-slate-100: #1c2840;
+  --color-slate-200: #26324a;
+  --color-slate-300: #3a4862;
+  --color-slate-500: #94a3b8;
+  --color-slate-600: #cbd5e1;
+  --color-slate-700: #e2e8f0;
+
+  --color-red-50: oklch(63.7% 0.237 25.331 / 0.14);
+  --color-red-100: oklch(63.7% 0.237 25.331 / 0.2);
+  --color-red-200: oklch(63.7% 0.237 25.331 / 0.32);
+  --color-red-300: oklch(63.7% 0.237 25.331 / 0.55);
+  --color-red-600: oklch(70.4% 0.191 22.216);
+  --color-red-700: oklch(80.8% 0.114 19.571);
+
+  --color-emerald-50: oklch(69.6% 0.17 162.48 / 0.14);
+  --color-emerald-100: oklch(69.6% 0.17 162.48 / 0.2);
+  --color-emerald-200: oklch(69.6% 0.17 162.48 / 0.32);
+  --color-emerald-600: oklch(76.5% 0.177 163.223);
+  --color-emerald-700: oklch(84.5% 0.143 164.978);
+
+  --color-amber-50: oklch(76.9% 0.188 70.08 / 0.13);
+  --color-amber-100: oklch(76.9% 0.188 70.08 / 0.2);
+  --color-amber-200: oklch(76.9% 0.188 70.08 / 0.32);
+  --color-amber-600: oklch(82.8% 0.189 84.429);
+  --color-amber-700: oklch(87.9% 0.169 91.605);
+  --color-amber-800: oklch(92.4% 0.12 95.746);
+  --color-amber-900: oklch(96.2% 0.059 95.617);
+
+  --color-violet-50: oklch(60.6% 0.25 292.717 / 0.16);
+  --color-violet-100: oklch(60.6% 0.25 292.717 / 0.22);
+  --color-violet-600: oklch(70.2% 0.183 293.541);
+  --color-violet-700: oklch(81.1% 0.111 293.571);
+  --color-pink-50: oklch(65.6% 0.241 354.308 / 0.16);
+  --color-pink-100: oklch(65.6% 0.241 354.308 / 0.22);
+  --color-pink-700: oklch(82.3% 0.12 346.018);
+  --color-cyan-50: oklch(71.5% 0.143 215.221 / 0.16);
+  --color-cyan-100: oklch(71.5% 0.143 215.221 / 0.22);
+  --color-cyan-700: oklch(86.5% 0.127 207.078);
+  --color-teal-100: oklch(70.4% 0.14 182.503 / 0.22);
+  --color-teal-700: oklch(85.5% 0.138 181.071);
+  --color-orange-100: oklch(70.5% 0.213 47.604 / 0.22);
+  --color-orange-700: oklch(83.7% 0.128 66.29);
+  --color-indigo-100: oklch(58.5% 0.233 277.117 / 0.24);
+  --color-indigo-700: oklch(78.5% 0.115 274.713);
+  --color-blue-100: oklch(62.3% 0.214 259.815 / 0.22);
+  --color-blue-700: oklch(80.9% 0.105 251.813);
 }
 
 /* Tailwind's preflight already resets margins/padding. A global
    `* { margin: 0; padding: 0 }` here would be unlayered and override
    every spacing utility, so it is intentionally not included. */
+
+/* Native selects: the open option list does not inherit the page theme, and a
+   transparent select leaves options with a default background but inherited
+   (light, in dark mode) text. Give selects and their options explicit theme
+   colors. In the base layer, so utilities such as bg-canvas still override. */
+@layer base {
+  select {
+    background-color: var(--color-surface);
+    color: var(--color-navy);
+  }
+  select option,
+  select optgroup {
+    background-color: var(--color-surface);
+    color: var(--color-navy);
+  }
+  select option:disabled {
+    color: var(--color-muted);
+  }
+}
 
 body {
   background: var(--background);
@@ -35,12 +140,12 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* Standard white card: subtle border, small radius, minimal shadow. */
+/* Standard card: surface color, subtle border, small radius, minimal shadow. */
 @utility card {
-  background-color: #ffffff;
+  background-color: var(--color-surface);
   border: 1px solid var(--color-line);
   border-radius: 12px;
-  box-shadow: 0 1px 2px rgb(7 20 91 / 0.04);
+  box-shadow: var(--card-shadow);
 }
 
 /* Slim scrollbars */
@@ -52,9 +157,9 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #cfd4dc;
+  background: var(--scrollbar);
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #9aa3b2;
+  background: var(--scrollbar-hover);
 }

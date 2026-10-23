@@ -11,6 +11,7 @@
  */
 
 import { VALID_CURRENCIES, validateCreateInvoice, type ValidationError, type ValidationResult } from "@/lib/validation";
+import { LINE_UNITS, type LineUnit } from "@/lib/line-items";
 
 export const MAX_DRAFT_REQUEST_LENGTH = 2000;
 export const DEFAULT_DUE_DAYS = 14;
@@ -31,8 +32,7 @@ export interface DraftClient {
 }
 
 /** What a line item's quantity counts; "fixed" is a single fixed price. */
-export const LINE_UNITS = ["hour", "day", "week", "month", "item", "fixed"] as const;
-export type LineUnit = (typeof LINE_UNITS)[number];
+export { LINE_UNITS, type LineUnit };
 
 export interface DraftLineItem {
   description: string;

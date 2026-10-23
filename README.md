@@ -17,6 +17,8 @@
 - [Authentication (single-owner demo)](#authentication-single-owner-demo)
 - [Database Setup (MySQL + Prisma)](#database-setup-mysql--prisma)
 - [Running Locally](#running-locally)
+- [Invoice Emails](#invoice-emails)
+- [Light/Dark Theme](#lightdark-theme)
 - [PayPal Sandbox Checkout](#paypal-sandbox-checkout)
 - [API Reference](#api-reference)
 - [Project Structure](#project-structure)
@@ -43,6 +45,8 @@ Freelancers and small business owners spend significant time chasing unpaid invo
 | **Create Invoice** | ✅ Implemented | Saves invoices to MySQL as DRAFT for an existing client, with editable line items and currency. Line items are combined into the invoice description |
 | **Client Management** | ✅ Implemented | Client grid with totals from MySQL; add new clients |
 | **PayPal Sandbox Checkout** | ✅ Implemented | Server-side order creation, approval redirect, cancellation, and verified server-side capture that marks the invoice **PAID** |
+| **Invoice Emails** | ✅ Implemented | Send a saved DRAFT invoice to the client email on file via Zapier → Gmail; it becomes SENT only after Zapier accepts the email (demo mode when not configured) |
+| **Light/Dark Theme** | ✅ Implemented | Sun/moon toggle in the top navigation (and on the login page); the choice is saved in the browser and applied before first paint |
 | **AI Follow-up Reminders** | ✅ Implemented | Gemini drafts reminders for unpaid SENT/OVERDUE invoices; you review and edit, then approve to deliver via Zapier (demo mode when Zapier is not configured) |
 | **AI Invoice Generator** | ✅ Implemented | Gemini turns a plain-language request into an editable draft (client, currency, dates, line items); nothing is saved until you click Save Draft |
 | **Settings** | 🔲 Planned (UI only) | Preferences are not persisted; the "Connect PayPal" button is a disabled placeholder |
@@ -122,6 +126,9 @@ GEMINI_API_KEY="your-gemini-api-key"
 # Optional: Zapier delivery for approved follow-up reminders (demo mode when both are unset)
 ZAPIER_WEBHOOK_URL="https://hooks.zapier.com/hooks/catch/your-id/your-hook/"
 ZAPIER_WEBHOOK_SECRET="your-long-random-secret"
+
+# Optional: Zapier delivery for invoice emails (demo mode when unset; uses the same secret)
+ZAPIER_INVOICE_WEBHOOK_URL="https://hooks.zapier.com/hooks/catch/your-id/your-invoice-hook/"
 ```
 
 PayPal credentials and the Gemini key are used **only on the server** (`src/lib/paypal.ts`, `src/lib/ai-invoice.ts`). No key is exposed to the browser.
@@ -190,7 +197,7 @@ On **/create-invoice**, describe the work (e.g. *"12 hours of UX research for Ac
    - The result must pass the same rules as `POST /api/invoices`.
 5. The form is filled in for review. You can edit everything; **nothing is saved** until you click **Save Draft**, which creates a `DRAFT` invoice through the normal invoice API. The AI cannot set `PAID` or touch PayPal.
 
-The **Reminder preview** card on this page is sample wording only, and no email is sent from it. Real reminders go through **/follow-ups**: draft with AI, approve, then the reminder is handed to Zapier for Gmail delivery.
+After **Save Draft**, the **Send** button emails that saved draft to the client (see [Invoice Emails](#invoice-emails)). The **Reminder preview** card on this page is sample wording only and never sends anything. Real reminders go through **/follow-ups**: draft with AI, approve, then the reminder is handed to Zapier for Gmail delivery.
 
 **Setup:** create a key at [Google AI Studio](https://aistudio.google.com/) → **Get API key**, add it to `.env` as `GEMINI_API_KEY`, and restart the server. Without it the endpoint returns `503` and the form still works manually. Free-tier rate limits apply; a `429` response means the quota is exhausted for now.
 
@@ -216,9 +223,12 @@ Leave **Invoice Number** blank and the server assigns the next number in `INV-YY
 | `ZAPIER_WEBHOOK_URL` and `ZAPIER_WEBHOOK_SECRET` unset | **Demo mode** — nothing is sent, and the app says so |
 | Only one set, non-https URL, or secret under 16 characters | **Misconfigured** — sending is refused (`503`) |
 | Zapier returns 2xx | "Accepted by Zapier" — your Zap then sends the email/Slack message |
-| Zapier error, timeout, or unreachable | Error shown; the reminder was **not** sent |
+| Zapier error response or unreachable | Error shown; the reminder was **not** sent |
+| Zapier did not respond within 10 seconds | Error (`504`): it is **unknown** whether the reminder was sent — check your Zap history before retrying |
+| Same invoice sent again within 10 minutes of a handoff (or while a send is in progress) | Refused (`409`) to avoid a duplicate email; the button also locks after a successful send |
+| Subject and message do not mention the invoice number, or mention a different `INV-…` number | Refused (`422`), nothing sent |
 
-ClearCollect only confirms that Zapier **received** the reminder. Whether the email or Slack message was delivered is visible in your Zap's history.
+ClearCollect only confirms that Zapier **received** the reminder. Whether the email or Slack message was delivered is visible in your Zap's history. The duplicate-send guard is kept in server memory, so it resets when the server restarts.
 
 ### Zapier setup
 
@@ -232,7 +242,7 @@ ClearCollect only confirms that Zapier **received** the reminder. Whether the em
    |---|---|
    | To | `recipient_email` |
    | Subject | `subject` |
-   | Body | `message` (already contains the invoice number, amount and due date) |
+   | Body | `message` (the default and AI drafts contain the invoice number, amount and due date; the server requires the invoice number) |
 
    `invoice_number` and `amount` are also available separately if you want them in the subject or a footer.
 6. Turn the Zap on.
@@ -296,6 +306,50 @@ Open http://localhost:3000.
 | Auth setup | `npm run auth:setup` | Generate `AUTH_SECRET` and `OWNER_PASSWORD_HASH` (see [Authentication](#authentication-single-owner-demo)) |
 
 ---
+
+## Invoice Emails
+
+Send a saved invoice to its client from **Create Invoice** (after **Save Draft**) or from the **Send** action on any DRAFT row in **Invoices**.
+
+1. A dialog shows the email exactly as the server built it: **To** (the client email stored in MySQL — the browser cannot choose a recipient), subject, and body.
+2. The body contains the invoice number, issue date, due date, each line item (quantity × rate = amount), the total with its currency code, and a payment instruction: pay the total by the due date with the invoice number as reference, and reply for payment details. **No payment link and no PDF attachment** are included, and the email does not claim either.
+3. **Send email** calls `POST /api/invoices/[id]/send`. Only an unpaid **DRAFT** invoice with a valid client email can be sent.
+
+**What happens to the invoice**
+
+| Situation | Result |
+|---|---|
+| `ZAPIER_INVOICE_WEBHOOK_URL` unset | **Demo mode** — nothing sent, invoice stays DRAFT |
+| URL set without `ZAPIER_WEBHOOK_SECRET`, non-https, or short secret | **Misconfigured** (`503`), nothing sent |
+| Zapier returns 2xx | Invoice marked **SENT**; "Accepted by Zapier" — Gmail delivery happens in your Zap |
+| Zapier error response or unreachable | Not sent (`502`), invoice stays DRAFT, retry allowed |
+| No response within 10 seconds | **Unknown** (`504`): invoice stays DRAFT and is flagged. Check your Zap history, then either **mark as SENT** (if it went out) or tick the confirmation and **send again** |
+| Second click / second tab while sending | Refused (`409`); only one request can claim the invoice |
+| Already SENT, PAID, OVERDUE or CANCELLED | Refused (`409`) — use Follow-ups for reminders |
+
+The invoice is marked SENT only after Zapier accepts the email. A database claim (`emailState = SENDING`, set with a conditional update) makes concurrent sends impossible, and edits and deletes wait while a send is in progress. A send interrupted by a server crash is treated like a timeout after 2 minutes. Saving and sending are separate steps, so a failed send never loses the saved draft.
+
+### Zapier setup (invoice emails)
+
+Use a **separate Zap** from reminders:
+
+1. Create a Zap with **Webhooks by Zapier → Catch Hook** and put its URL in `.env` as `ZAPIER_INVOICE_WEBHOOK_URL` (the existing `ZAPIER_WEBHOOK_SECRET` is reused). Restart the server.
+2. Send one invoice to an inbox you control (a DRAFT for a client whose email is yours) so Zapier captures a sample.
+3. Add a **Filter**: continue only if `auth_token` exactly matches your secret.
+4. Add **Gmail → Send Email**: To = `recipient_email`, Subject = `subject`, Body = `message` (plain text).
+5. Turn the Zap on.
+
+Payload fields: `event` (`invoice.email.approved`), `auth_token`, `send_id` (unique per attempt), `approved_at`, `invoice_id`, `invoice_number`, `amount` (e.g. `USD 1,830.00`), `amount_value`, `currency`, `issue_date`, `due_date`, `line_items`, `client_name`, `client_company`, `recipient_email`, `subject`, `message`.
+
+Invoices saved before line items were stored are emailed with their description and total as a single line. Editing an invoice's amount or description clears its stored line items for the same reason.
+
+## Light/Dark Theme
+
+The sun/moon button in the top navigation (and on the login page) switches between the light theme and a dark navy/slate theme. The icon shows the theme it switches **to** (moon in light mode, sun in dark mode) and has a matching accessible label.
+
+- The choice is saved in `localStorage` (`clearcollect-theme`); with no saved choice the OS preference is used.
+- An inline script in `app/layout.tsx` applies it to `<html data-theme>` before the first paint, so there is no flash or hydration mismatch. Other open tabs follow changes.
+- Colors come from design tokens in `src/app/globals.css` (`surface`, `canvas`, `navy`, `line`, `muted`, `brand`), which the dark theme redefines. Status tints (badges, notices, avatars) map to translucent tints with light text in dark mode. Use `bg-surface` instead of `bg-white`; a test fails if a page hard-codes white surfaces or hex colors.
 
 ## PayPal Sandbox Checkout
 
@@ -395,6 +449,8 @@ Authentication tests (`tests/auth.test.ts`) use throwaway test credentials set i
 | `POST /api/ai/invoice-draft` | `{ request, selectedClientId?, issueDate?, dueDate? }` → `{ kind: "draft", … }` for review or `{ kind: "clarification", questions }`; never saves |
 | `POST /api/follow-ups/draft` | Gemini reminder draft for an unpaid invoice: `{ invoiceId }` → `{ subject, message }` |
 | `POST /api/follow-ups/send` | Deliver an approved reminder `{ invoiceId, subject, message }` to Zapier (or demo mode) |
+| `GET /api/invoices/[id]/send` | Preview the invoice email (recipient from MySQL, subject, message, delivery mode); sends nothing |
+| `POST /api/invoices/[id]/send` | Email a saved DRAFT invoice via Zapier `{ confirmResend? }`; marks it SENT once Zapier accepts |
 | `GET /api/follow-ups/status` | Delivery mode: `zapier`, `demo` or `misconfigured` (no secrets) |
 | `POST /api/paypal/webhook` | Signature-verified PayPal webhook: `CHECKOUT.ORDER.APPROVED`, `PAYMENT.CAPTURE.COMPLETED` |
 
@@ -453,9 +509,9 @@ clearcollect/
 | **Sandbox only** | Tested against PayPal Sandbox; live use requires production credentials, webhooks, and review. |
 | **Single-owner only (not multi-tenant)** | One password unlocks all data. There are no user accounts, roles, or per-business isolation, so do not present it as supporting multiple businesses. Sessions are stateless cookies: signing out clears the cookie, but a copied cookie stays valid until it expires (8 h) or the password or `AUTH_SECRET` is changed. |
 | **Reminder delivery needs Zapier** | Without a configured Zap, reminders run in demo mode. ClearCollect confirms Zapier received a reminder, not that the email/Slack message was delivered. Sent reminders are not stored, so the app does not track reminder history. AI drafts depend on Gemini free-tier limits and should always be reviewed. |
-| **Email only via Follow-ups** | Reminders are sent only from **/follow-ups** (approved, then handed to Zapier → Gmail). The Create Invoice reminder card is a preview, and **Send Invoice (Demo)** does not send invoices. |
+| **Email via Zapier only** | Invoice emails (Create Invoice / Invoices) and reminders (Follow-ups) are handed to Zapier → Gmail. ClearCollect confirms Zapier accepted an email, not that Gmail delivered it. Invoice emails have no PDF attachment or payment link. |
 | **AI clarification heuristics** | The "days + hourly rate" check and the "number not stated in your request" flag match common phrasings (digits, separators, `2k`, number words up to twenty, tens). Unusual wording may be flagged for confirmation unnecessarily; it is never silently converted. |
-| **Line items not stored separately** | Line items are editable in the form, but only the total and a combined description are saved. |
+| **Line items stored as JSON** | New invoices store their line items (used in invoice emails); invoices created earlier only have a total and a combined description. |
 | **Settings not persisted** | Settings page is UI only. |
 | **Currency support** | `INR` and some other currencies may be rejected depending on the PayPal merchant account. |
 

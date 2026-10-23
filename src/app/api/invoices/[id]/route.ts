@@ -17,6 +17,10 @@ import {
   serverErrorResponse,
 } from "@/lib/validation";
 import { InvoiceStatus } from "@/generated/prisma/enums";
+import { Prisma } from "@/generated/prisma/client";
+import { isSendInProgress } from "@/lib/invoice-email";
+
+const SEND_IN_PROGRESS = "This invoice is being emailed right now; try again in a moment";
 
 // Helper: parse and validate the [id] route segment
 function parseId(ctx: RouteContext<"/api/invoices/[id]">): Promise<number | null> {
@@ -76,7 +80,7 @@ export async function PATCH(
     // Fetch current invoice to enforce transition rules
     const existing = await prisma.invoice.findUnique({
       where: { id },
-      select: { id: true, status: true },
+      select: { id: true, status: true, emailState: true, emailStateAt: true },
     });
     if (!existing) return notFoundResponse(`Invoice ${id} not found`);
 
@@ -88,6 +92,11 @@ export async function PATCH(
       );
     }
 
+    // The email being sent was built from the current values.
+    if (isSendInProgress(existing, Date.now())) {
+      return Response.json({ ok: false, error: SEND_IN_PROGRESS }, { status: 409 });
+    }
+
     const { amount, ...rest } = result.data;
 
     const updated = await prisma.invoice.update({
@@ -95,6 +104,9 @@ export async function PATCH(
       data: {
         ...rest,
         ...(amount !== undefined ? { amount: amount.toFixed(2) } : {}),
+        // Stored line items describe the old amount/description; drop them so
+        // an invoice email never lists items that no longer match.
+        ...(amount !== undefined || rest.description !== undefined ? { lineItems: Prisma.DbNull } : {}),
         // A pending PayPal order was priced from the old amount/currency;
         // detach it so payment must start over with the new values.
         ...(amount !== undefined || rest.currency !== undefined ? { paypalOrderId: null } : {}),
@@ -125,9 +137,13 @@ export async function DELETE(
   try {
     const existing = await prisma.invoice.findUnique({
       where: { id },
-      select: { id: true, status: true },
+      select: { id: true, status: true, emailState: true, emailStateAt: true },
     });
     if (!existing) return notFoundResponse(`Invoice ${id} not found`);
+
+    if (isSendInProgress(existing, Date.now())) {
+      return Response.json({ ok: false, error: SEND_IN_PROGRESS }, { status: 409 });
+    }
 
     // Only DRAFT or CANCELLED invoices may be deleted
     const deletableStatuses: InvoiceStatus[] = [InvoiceStatus.DRAFT, InvoiceStatus.CANCELLED];
