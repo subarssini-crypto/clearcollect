@@ -42,6 +42,11 @@ model Invoice {
   // PayPal payment tracking
   paypalOrderId   String?      @unique
   paypalCaptureId String?      @unique
+  // Set together with paypalCaptureId, only after server-side verification of a
+  // COMPLETED capture (src/lib/paypal.ts). Null for invoices paid before these
+  // columns existed — shown as "Unavailable", never back-filled with guesses.
+  paidAt            DateTime?
+  paypalEnvironment PaymentEnvironment?
 
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
@@ -50,6 +55,11 @@ model Invoice {
 
   @@index([clientId])
   @@index([status, dueDate])
+}
+
+enum PaymentEnvironment {
+  SANDBOX
+  LIVE
 }
 
 enum InvoiceEmailState {

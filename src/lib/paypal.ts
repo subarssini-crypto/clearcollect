@@ -304,32 +304,95 @@ export async function captureOrderForInvoice(orderId: string): Promise<CaptureOu
     throw new PaymentError("Captured amount does not match the invoice", 409);
   }
 
-  // Conditional update: only transitions an unpaid invoice still tied to
-  // this order. The unique paypalCaptureId column blocks reuse of a capture.
-  const { count } = await prisma.invoice.updateMany({
-    where: {
-      id: invoice.id,
-      paypalOrderId: orderId,
-      paypalCaptureId: null,
-      status: { in: PAYABLE_STATUSES },
-    },
-    data: { status: InvoiceStatus.PAID, paypalCaptureId: capture.id },
-  });
-
-  if (count === 0) {
-    const current = await prisma.invoice.findUnique({
-      where: { id: invoice.id },
-      select: { status: true, paypalCaptureId: true },
-    });
-    if (current?.status !== InvoiceStatus.PAID || current.paypalCaptureId !== capture.id) {
-      console.error(
-        `[paypal] capture ${capture.id} completed but invoice ${invoice.id} could not be marked PAID`
-      );
-      throw new PaymentError("Payment captured but invoice state changed; needs review", 409);
-    }
-  }
+  const record = verifiedPaymentRecord(
+    { id: capture.id, createTime: capture.createTime },
+    getPaypalClient().environment,
+    new Date()
+  );
+  await recordVerifiedPayment(invoice.id, orderId, record);
 
   return { status: "paid", invoiceNumber: invoice.invoiceNumber };
+}
+
+// ── Verified payment record ───────────────────────────────────────────────────
+
+export type PaymentEnvironmentName = "SANDBOX" | "LIVE";
+
+/** What is stored when a capture has been verified (see captureOrderForInvoice). */
+export interface VerifiedPaymentRecord {
+  captureId: string;
+  paidAt: Date;
+  environment: PaymentEnvironmentName;
+}
+
+/**
+ * Builds the stored record from a capture PayPal returned to the server.
+ * The payment time is PayPal's capture create_time; if PayPal omits it or it
+ * is unparseable, the server's verification time is used instead. The
+ * environment is the server's own PayPal client configuration.
+ */
+export function verifiedPaymentRecord(
+  capture: { id: string; createTime?: string },
+  environment: Environment,
+  verifiedAt: Date
+): VerifiedPaymentRecord {
+  const captured = capture.createTime ? new Date(capture.createTime) : null;
+  return {
+    captureId: capture.id,
+    paidAt: captured && !Number.isNaN(captured.getTime()) ? captured : verifiedAt,
+    environment: environment === Environment.Production ? "LIVE" : "SANDBOX",
+  };
+}
+
+/** Conditional writes for recording a verified payment. */
+export interface PaymentStore {
+  /** Unpaid invoice still tied to `orderId`, with no capture yet → PAID + record. False if nothing matched. */
+  markPaid(invoiceId: number, orderId: string, record: VerifiedPaymentRecord): Promise<boolean>;
+  current(invoiceId: number): Promise<{ status: string; paypalCaptureId: string | null } | null>;
+}
+
+export const prismaPaymentStore: PaymentStore = {
+  async markPaid(invoiceId, orderId, record) {
+    const { count } = await prisma.invoice.updateMany({
+      where: {
+        id: invoiceId,
+        paypalOrderId: orderId,
+        paypalCaptureId: null,
+        status: { in: PAYABLE_STATUSES },
+      },
+      data: {
+        status: InvoiceStatus.PAID,
+        paypalCaptureId: record.captureId,
+        paidAt: record.paidAt,
+        paypalEnvironment: record.environment,
+      },
+    });
+    return count === 1;
+  },
+  current: (invoiceId) =>
+    prisma.invoice.findUnique({ where: { id: invoiceId }, select: { status: true, paypalCaptureId: true } }),
+};
+
+/**
+ * Marks the invoice PAID with its verified capture, exactly once. The update
+ * only matches an unpaid invoice still tied to this order with no capture, and
+ * paypalCaptureId is unique, so a repeated webhook or return for the same
+ * capture is a no-op ("already_recorded") that leaves the first record intact.
+ */
+export async function recordVerifiedPayment(
+  invoiceId: number,
+  orderId: string,
+  record: VerifiedPaymentRecord,
+  store: PaymentStore = prismaPaymentStore
+): Promise<"recorded" | "already_recorded"> {
+  if (await store.markPaid(invoiceId, orderId, record)) return "recorded";
+
+  const current = await store.current(invoiceId);
+  if (current?.status === InvoiceStatus.PAID && current.paypalCaptureId === record.captureId) {
+    return "already_recorded";
+  }
+  console.error(`[paypal] capture ${record.captureId} completed but invoice ${invoiceId} could not be marked PAID`);
+  throw new PaymentError("Payment captured but invoice state changed; needs review", 409);
 }
 
 // ── Webhooks ──────────────────────────────────────────────────────────────────

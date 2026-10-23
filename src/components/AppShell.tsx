@@ -5,12 +5,14 @@ import { usePathname } from "next/navigation";
 import { useState, type ReactNode } from "react";
 import ThemeToggle from "@/components/ThemeToggle";
 
-type NavItem = { href: string; label: string; icon: string[] };
+/** sidebarOnly: shown in the icon rail and mobile menu, not the top navigation bar. */
+type NavItem = { href: string; label: string; icon: string[]; sidebarOnly?: boolean };
 
 // Heroicons-style outline paths (same icons as the previous sidebar).
 const ICONS = {
   dashboard: ["M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"],
   create: ["M12 4v16m8-8H4"],
+  transactions: ["M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z"],
   invoices: ["M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"],
   clients: ["M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"],
   followUps: ["M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"],
@@ -24,6 +26,7 @@ const ICONS = {
 const NAV: NavItem[] = [
   { href: "/", label: "Dashboard", icon: ICONS.dashboard },
   { href: "/invoices", label: "Invoices", icon: ICONS.invoices },
+  { href: "/transactions", label: "Transactions", icon: ICONS.transactions, sidebarOnly: true },
   { href: "/create-invoice", label: "Create Invoice", icon: ICONS.create },
   { href: "/clients", label: "Clients", icon: ICONS.clients },
   { href: "/follow-ups", label: "Follow-ups", icon: ICONS.followUps },
@@ -102,7 +105,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
         </Link>
 
         <nav className="hidden h-full flex-1 items-center justify-center gap-1 md:flex lg:gap-6" aria-label="Primary">
-          {NAV.map((item) => {
+          {NAV.filter((item) => !item.sidebarOnly).map((item) => {
             const active = isActive(pathname, item.href);
             return (
               <Link
