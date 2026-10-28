@@ -54,14 +54,16 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   try {
+    // Archived clients are not offered for new invoices.
     const clients = await prisma.client.findMany({
+      where: { archivedAt: null },
       select: { id: true, name: true, company: true },
       orderBy: { name: "asc" },
     });
     const selectedClientId = selected as number | null;
     if (selectedClientId !== null && !clients.some((c) => c.id === selectedClientId)) {
       return validationErrorResponse([
-        { field: "selectedClientId", message: "The selected client no longer exists. Reload the page and select a client." },
+        { field: "selectedClientId", message: "The selected client no longer exists or is archived. Reload the page and select a client." },
       ]);
     }
 

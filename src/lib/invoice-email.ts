@@ -19,11 +19,15 @@
  *   send of an invoice that was moved back to DRAFT, sending again needs an
  *   explicit `confirmResend` — the owner must first check the Zap history.
  * - Recipient, amounts, dates, and line items always come from MySQL.
+ * - When the caller passes a trusted app origin (APP_URL, or localhost in
+ *   development), the email includes the client's secure payment page link
+ *   (src/lib/payment-link.ts); otherwise it keeps the plain payment instruction.
  */
 
 import { prisma } from "@/lib/prisma";
 import { InvoiceEmailState, InvoiceStatus } from "@/generated/prisma/enums";
 import { lineItemCents, lineItemsTotalCents, parseStoredLineItems, type StoredLineItem } from "@/lib/line-items";
+import { ensurePaymentToken, paymentPageUrl } from "@/lib/payment-link";
 import { formatAmount, formatLongDate, getZapierConfig, postToZapier, validRecipient, type ZapierConfig } from "@/lib/zapier";
 
 /** A SENDING claim older than this is treated as interrupted (outcome unknown). */
@@ -67,6 +71,7 @@ export interface InvoiceEmailRecord {
   lineItems: unknown;
   emailState: EmailState | null;
   emailStateAt: Date | null;
+  paymentToken?: string | null;
   client: { id: number; name: string; email: string | null; company: string | null };
 }
 
@@ -125,6 +130,7 @@ export interface InvoiceEmail {
   subject: string;
   message: string;
   lineItemsText: string;
+  paymentUrl: string | null;
   facts: { invoiceNumber: string; amount: string; amountValue: string; currency: string; issueDate: string; dueDate: string };
 }
 
@@ -151,7 +157,7 @@ function describeLine(item: StoredLineItem, currency: string): string {
  * up to the stored amount; invoices saved before line items were stored show
  * their description and total as a single line.
  */
-export function composeInvoiceEmail(invoice: InvoiceEmailRecord): InvoiceEmail {
+export function composeInvoiceEmail(invoice: InvoiceEmailRecord, paymentUrl: string | null = null): InvoiceEmail {
   const recipient = invoiceRecipient(invoice);
   const amountCents = Math.round(Number(invoice.amount.toString()) * 100);
   const amount = formatAmount(invoice.amount, invoice.currency);
@@ -189,8 +195,13 @@ export function composeInvoiceEmail(invoice: InvoiceEmailRecord): InvoiceEmail {
     "",
     `Total due: ${amount}`,
     "",
-    `How to pay: please pay ${amount} by ${dueDate} and include ${invoice.invoiceNumber} as the payment reference. ` +
-      "If you need payment details or have any questions, just reply to this email.",
+    paymentUrl
+      ? `How to pay: please pay ${amount} by ${dueDate}. You can view and pay this invoice securely online: ${paymentUrl}
+
+` +
+        "If you have any questions, just reply to this email."
+      : `How to pay: please pay ${amount} by ${dueDate} and include ${invoice.invoiceNumber} as the payment reference. ` +
+        "If you need payment details or have any questions, just reply to this email.",
     "",
     "Thank you!",
   ].join("\n");
@@ -200,6 +211,7 @@ export function composeInvoiceEmail(invoice: InvoiceEmailRecord): InvoiceEmail {
     subject,
     message,
     lineItemsText,
+    paymentUrl,
     facts: {
       invoiceNumber: invoice.invoiceNumber,
       amount,
@@ -234,6 +246,7 @@ export function buildInvoiceEmailPayload(invoice: InvoiceEmailRecord, email: Inv
     recipient_email: email.recipient, // Gmail "To"
     subject: email.subject,
     message: email.message,
+    payment_url: email.paymentUrl ?? "",
   };
 }
 
@@ -250,6 +263,8 @@ export interface InvoiceEmailStore {
   markUnknown(id: number, claimedAt: Date, now: Date): Promise<void>;
   /** SENDING (this claim) → the state before the claim (definitely not sent). */
   release(id: number, claimedAt: Date, previous: { state: EmailState | null; at: Date | null }): Promise<void>;
+  /** The invoice's public payment token, created on first use. */
+  ensurePaymentToken?(id: number): Promise<string | null>;
 }
 
 const RECORD_SELECT = {
@@ -265,11 +280,13 @@ const RECORD_SELECT = {
   lineItems: true,
   emailState: true,
   emailStateAt: true,
+  paymentToken: true,
   client: { select: { id: true, name: true, email: true, company: true } },
 } as const;
 
 export const prismaInvoiceEmailStore: InvoiceEmailStore = {
   load: (id) => prisma.invoice.findUnique({ where: { id }, select: RECORD_SELECT }),
+  ensurePaymentToken,
 
   async claim(id, at, { allowResend, staleBefore }) {
     const { count } = await prisma.invoice.updateMany({
@@ -318,6 +335,13 @@ export const prismaInvoiceEmailStore: InvoiceEmailStore = {
 
 // ── Preview and send ──────────────────────────────────────────────────────────
 
+/** The payment page URL to put in the email, or null when no trusted origin was given. */
+async function resolvePaymentUrl(invoice: InvoiceEmailRecord, store: InvoiceEmailStore, origin: string | null | undefined): Promise<string | null> {
+  if (!origin) return null;
+  const token = invoice.paymentToken ?? (await store.ensurePaymentToken?.(invoice.id)) ?? null;
+  return token ? paymentPageUrl(origin, token) : null;
+}
+
 export type DeliveryMode = "zapier" | "demo" | "misconfigured";
 
 export function invoiceEmailDelivery(env: Record<string, string | undefined> = process.env): { mode: DeliveryMode; config: ZapierConfig } {
@@ -333,6 +357,8 @@ export interface InvoiceEmailPreview {
   recipient: string;
   subject: string;
   message: string;
+  /** Whether the email includes the client's secure payment page link. */
+  paymentLinkIncluded: boolean;
   inProgress: boolean;
   /** Set when sending again needs `confirmResend` (see resendWarning). */
   resendWarning: string | null;
@@ -341,14 +367,14 @@ export interface InvoiceEmailPreview {
 /** What would be sent, without sending or changing anything. */
 export async function previewInvoiceEmail(
   invoiceId: number,
-  deps: { store?: InvoiceEmailStore; env?: Record<string, string | undefined>; now?: number } = {}
+  deps: { store?: InvoiceEmailStore; env?: Record<string, string | undefined>; now?: number; paymentOrigin?: string | null } = {}
 ): Promise<InvoiceEmailPreview> {
   const store = deps.store ?? prismaInvoiceEmailStore;
   const now = deps.now ?? Date.now();
   const invoice = await store.load(invoiceId);
   if (!invoice) throw new InvoiceEmailError(`Invoice ${invoiceId} not found`, 404, "not_found");
   assertSendable(invoice);
-  const email = composeInvoiceEmail(invoice);
+  const email = composeInvoiceEmail(invoice, await resolvePaymentUrl(invoice, store, deps.paymentOrigin));
   return {
     invoiceId: invoice.id,
     invoiceNumber: invoice.invoiceNumber,
@@ -357,6 +383,7 @@ export async function previewInvoiceEmail(
     recipient: email.recipient,
     subject: email.subject,
     message: email.message,
+    paymentLinkIncluded: email.paymentUrl !== null,
     inProgress: isSendInProgress(invoice, now),
     resendWarning: resendWarning(invoice, now),
   };
@@ -374,7 +401,13 @@ export type InvoiceEmailResult =
 export async function sendInvoiceEmail(
   invoiceId: number,
   options: { confirmResend?: boolean } = {},
-  deps: { store?: InvoiceEmailStore; env?: Record<string, string | undefined>; fetchImpl?: typeof fetch; now?: () => number } = {}
+  deps: {
+    store?: InvoiceEmailStore;
+    env?: Record<string, string | undefined>;
+    fetchImpl?: typeof fetch;
+    now?: () => number;
+    paymentOrigin?: string | null;
+  } = {}
 ): Promise<InvoiceEmailResult> {
   const store = deps.store ?? prismaInvoiceEmailStore;
   const clock = deps.now ?? Date.now;
@@ -382,7 +415,7 @@ export async function sendInvoiceEmail(
   const invoice = await store.load(invoiceId);
   if (!invoice) throw new InvoiceEmailError(`Invoice ${invoiceId} not found`, 404, "not_found");
   assertSendable(invoice);
-  const email = composeInvoiceEmail(invoice);
+  const email = composeInvoiceEmail(invoice, await resolvePaymentUrl(invoice, store, deps.paymentOrigin));
 
   const { config } = invoiceEmailDelivery(deps.env);
   if (config.state === "demo") {

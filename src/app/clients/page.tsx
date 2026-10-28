@@ -3,6 +3,14 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { EMAIL_STATUS_LABEL, INVITE_STATUS_LABEL, InviteCustomerDialog } from "@/components/InviteCustomerDialog";
+import { btnPrimary } from "@/components/ui";
+
+type PortalSummary = {
+  linkedAccounts: number;
+  latestInvite: { status: keyof typeof INVITE_STATUS_LABEL; email: keyof typeof EMAIL_STATUS_LABEL } | null;
+};
 
 type Client = {
   id: number;
@@ -10,10 +18,33 @@ type Client = {
   email: string | null;
   company: string | null;
   createdAt: string;
+  archivedAt?: string | null;
   _count?: {
     invoices: number;
   };
+  portal?: PortalSummary;
 };
+
+/** Customer Portal state on a client card: linked accounts, else the latest invitation. */
+function PortalStatus({ portal }: { portal?: PortalSummary }) {
+  if (!portal) return <span />;
+  if (portal.linkedAccounts > 0) {
+    return (
+      <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
+        Portal: {portal.linkedAccounts} linked
+      </span>
+    );
+  }
+  const invite = portal.latestInvite;
+  if (!invite) return <span className="text-[11px] text-muted">Not invited</span>;
+  const label = INVITE_STATUS_LABEL[invite.status];
+  const failed = invite.status === "pending" && invite.email === "failed";
+  return (
+    <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${failed ? "bg-red-50 text-red-700" : label.className}`}>
+      Invite {failed ? "email failed" : label.text.toLowerCase()}
+    </span>
+  );
+}
 
 type Invoice = {
   id: number;
@@ -87,6 +118,50 @@ export default function ClientsPage() {
   const [email, setEmail] = useState("");
   const [company, setCompany] = useState("");
 
+  // Active clients by default; archived clients keep their invoices and can be restored.
+  const [view, setView] = useState<"active" | "archived">("active");
+  const [archiveTarget, setArchiveTarget] = useState<Client | null>(null);
+  const [archiveBusy, setArchiveBusy] = useState<number | null>(null);
+  const [archiveError, setArchiveError] = useState("");
+  const [notice, setNotice] = useState("");
+  const clientsUrl = view === "archived" ? "/api/clients?archived=true" : "/api/clients";
+
+  // Customer Portal invitations: the owner explicitly authorizes who can see a client's invoices.
+  const [inviteTarget, setInviteTarget] = useState<Client | null>(null);
+
+  async function setArchived(client: Client, archived: boolean) {
+    if (archiveBusy !== null) return;
+    setArchiveBusy(client.id);
+    setArchiveError("");
+    setNotice("");
+    try {
+      const response = await fetch(`/api/clients/${client.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ archived }),
+      });
+      let result: ApiResponse<Client> & { message?: string } = { ok: false };
+      try {
+        result = await response.json();
+      } catch {
+        result = { ok: false, error: `The server returned an unexpected response (HTTP ${response.status}).` };
+      }
+      if (!response.ok || !result.ok) {
+        throw new Error(result.errors?.map((e) => e.message).join(" ") || result.error || "The client was not updated.");
+      }
+      // It now belongs to the other tab.
+      setClients((current) => current.filter((c) => c.id !== client.id));
+      setNotice(result.message || `${client.name} ${archived ? "archived" : "restored"}.`);
+      setArchiveTarget(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "The client was not updated.";
+      if (archived) setArchiveError(message);
+      else setPageError(message);
+    } finally {
+      setArchiveBusy(null);
+    }
+  }
+
   // Load clients and invoices from the database.
   useEffect(() => {
     let cancelled = false;
@@ -94,7 +169,7 @@ export default function ClientsPage() {
     async function fetchData() {
       try {
         const [clientsResponse, invoicesResponse] = await Promise.all([
-          fetch("/api/clients"),
+          fetch(clientsUrl),
           fetch("/api/invoices?limit=100"),
         ]);
 
@@ -144,11 +219,11 @@ export default function ClientsPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [clientsUrl]);
 
   async function refreshData() {
     const [clientsResponse, invoicesResponse] = await Promise.all([
-      fetch("/api/clients"),
+      fetch(clientsUrl),
       fetch("/api/invoices?limit=100"),
     ]);
 
@@ -296,6 +371,65 @@ export default function ClientsPage() {
         </div>
       )}
 
+      {/* Active / archived filter */}
+      <div className="flex flex-wrap gap-1 mb-4 bg-slate-100 p-1 rounded-lg w-fit" role="group" aria-label="Client list">
+        {(["active", "archived"] as const).map((tab) => (
+          <button
+            key={tab}
+            id={`clients-tab-${tab}`}
+            onClick={() => {
+              setNotice("");
+              if (tab === view) return;
+              setPageError("");
+              setIsLoading(true);
+              setView(tab);
+            }}
+            aria-pressed={view === tab}
+            className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${view === tab ? "bg-surface text-navy shadow-sm" : "text-muted hover:text-slate-700"}`}
+          >
+            {tab === "active" ? "Active" : "Archived"}
+          </button>
+        ))}
+      </div>
+
+      {notice && (
+        <div role="status" className="mb-4 rounded-lg bg-emerald-50 p-4 text-sm text-emerald-700 ring-1 ring-emerald-200">
+          {notice}
+        </div>
+      )}
+
+      {inviteTarget && (
+        <InviteCustomerDialog
+          clientId={inviteTarget.id}
+          clientName={inviteTarget.name}
+          onClose={() => setInviteTarget(null)}
+          onChanged={() => {
+            refreshData().catch(() => {});
+          }}
+        />
+      )}
+
+      {archiveTarget && (
+        <ConfirmDialog
+          id="archive-client"
+          title={`Archive ${archiveTarget.name}?`}
+          confirmLabel="Archive client"
+          busyLabel="Archiving…"
+          busy={archiveBusy === archiveTarget.id}
+          error={archiveError}
+          onConfirm={() => setArchived(archiveTarget, true)}
+          onCancel={() => setArchiveTarget(null)}
+        >
+          <p>
+            <span className="font-semibold text-navy">{archiveTarget.name}</span>
+            {archiveTarget.email ? ` (${archiveTarget.email})` : ""} will be hidden from client selection for new invoices.
+          </p>
+          <p>
+            All {archiveTarget._count?.invoices ?? 0} invoice(s), payments, and reminders are kept unchanged. You can restore the client from the Archived tab at any time.
+          </p>
+        </ConfirmDialog>
+      )}
+
       {/* Loading state */}
       {isLoading && (
         <div className="card p-10 text-center text-[13px] text-muted">
@@ -306,9 +440,11 @@ export default function ClientsPage() {
       {/* Empty state */}
       {!isLoading && !pageError && clients.length === 0 && (
         <div className="card p-10 text-center">
-          <h2 className="font-semibold text-navy">No clients yet</h2>
+          <h2 className="font-semibold text-navy">{view === "archived" ? "No archived clients" : "No clients yet"}</h2>
           <p className="mt-2 text-sm text-muted">
-            Add your first client to start creating invoices.
+            {view === "archived"
+              ? "Archived clients appear here and can be restored."
+              : "Add your first client to start creating invoices."}
           </p>
         </div>
       )}
@@ -370,9 +506,15 @@ export default function ClientsPage() {
                     </div>
                   </div>
 
-                  <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">
-                    Client
-                  </span>
+                  {client.archivedAt ? (
+                    <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">
+                      Archived
+                    </span>
+                  ) : (
+                    <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">
+                      Client
+                    </span>
+                  )}
                 </div>
 
                 {client.company && client.company !== client.name && (
@@ -405,6 +547,20 @@ export default function ClientsPage() {
                   </div>
                 </div>
 
+                {!client.archivedAt && (
+                  <div className="mb-3 flex items-center justify-between gap-2">
+                    <PortalStatus portal={client.portal} />
+                    <button
+                      type="button"
+                      id={`invite-client-${client.id}`}
+                      onClick={() => setInviteTarget(client)}
+                      className={`${btnPrimary} py-1.5 text-xs`}
+                    >
+                      Invite Customer
+                    </button>
+                  </div>
+                )}
+
                 <div className="mt-auto flex items-center justify-between gap-3 text-xs text-slate-400 border-t border-line pt-3">
                   <span>
                     {lastInvoice
@@ -412,12 +568,37 @@ export default function ClientsPage() {
                       : "No invoices yet"}
                   </span>
 
-                  <Link
-                    href="/create-invoice"
-                    className="text-brand hover:text-brand-ink font-medium transition-colors whitespace-nowrap"
-                  >
-                    + Invoice
-                  </Link>
+                  {client.archivedAt ? (
+                    <button
+                      type="button"
+                      id={`restore-client-${client.id}`}
+                      onClick={() => setArchived(client, false)}
+                      disabled={archiveBusy !== null}
+                      className="text-brand hover:text-brand-ink font-medium transition-colors whitespace-nowrap disabled:opacity-50"
+                    >
+                      {archiveBusy === client.id ? "Restoring…" : "Restore"}
+                    </button>
+                  ) : (
+                    <span className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        id={`archive-client-${client.id}`}
+                        onClick={() => {
+                          setArchiveError("");
+                          setArchiveTarget(client);
+                        }}
+                        className="text-muted hover:text-navy font-medium transition-colors whitespace-nowrap"
+                      >
+                        Archive
+                      </button>
+                      <Link
+                        href="/create-invoice"
+                        className="text-brand hover:text-brand-ink font-medium transition-colors whitespace-nowrap"
+                      >
+                        + Invoice
+                      </Link>
+                    </span>
+                  )}
                 </div>
               </div>
             );

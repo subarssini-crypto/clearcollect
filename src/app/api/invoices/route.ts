@@ -115,11 +115,21 @@ export async function POST(request: Request): Promise<Response> {
     // Verify the referenced client exists before creating the invoice
     const client = await prisma.client.findUnique({
       where: { id: rest.clientId },
-      select: { id: true },
+      select: { id: true, name: true, archivedAt: true },
     });
     if (!client) {
       return Response.json(
         { ok: false, errors: [{ field: "clientId", message: `No client found with id ${rest.clientId}` }] },
+        { status: 422 }
+      );
+    }
+    // Archived clients keep their history but cannot receive new invoices.
+    if (client.archivedAt) {
+      return Response.json(
+        {
+          ok: false,
+          errors: [{ field: "clientId", message: `${client.name} is archived. Restore the client on the Clients page to create a new invoice.` }],
+        },
         { status: 422 }
       );
     }

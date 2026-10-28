@@ -240,7 +240,8 @@ describe("expandable sidebar rail", () => {
     assert.match(shell, /<RailLink item=\{NAV\[NAV\.length - 1\]\} pathname=\{pathname\} expanded=\{railExpanded\} \/>/);
     assert.match(shell, /aria-current=\{active \? "page" : undefined\}/);
     assert.match(shell, /active \? "bg-brand-50 text-brand" : "text-slate-400 hover:bg-canvas hover:text-navy"/);
-    assert.match(shell, /return href === "\/" \? pathname === "\/" : pathname\.startsWith\(href\);/);
+    // Exact match or a sub-path, so "/dashboard" never lights up for "/" and "/invoices" never for "/invoices-x".
+    assert.match(shell, /return pathname === href \|\| pathname\.startsWith\(`\$\{href\}\/`\);/);
   });
 
   test("phones keep the header menu: the rail stays hidden below md", () => {
@@ -252,9 +253,17 @@ describe("expandable sidebar rail", () => {
 describe("login page explains first-time setup", () => {
   const text = visibleText(loginPage);
 
-  test("states single-owner demo and no public registration", () => {
+  test("states single-owner demo and no public owner registration, pointing customers to the portal", () => {
     assert.match(text, /single-owner demo/);
-    assert.match(text, /no public registration/);
+    assert.match(text, /no public owner registration/);
+    assert.match(loginPage, /href="\/portal\/login"/);
+  });
+
+  test("has the public header with a Home link to the landing page, styled as on /portal/login", () => {
+    const portalLayout = readFileSync(new URL("../src/components/PortalAuthLayout.tsx", import.meta.url), "utf8");
+    const homeLink = /<Link href="\/" className="([^"]+)">\s*Home\s*<\/Link>/;
+    assert.match(loginPage, /<PublicHeader>/);
+    assert.equal(loginPage.match(homeLink)?.[1], portalLayout.match(homeLink)?.[1]);
   });
 
   test("gives the setup command, password, restart, and sign-in steps", () => {

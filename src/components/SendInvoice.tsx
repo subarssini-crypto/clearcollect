@@ -19,6 +19,7 @@ type Preview = {
   recipient: string;
   subject: string;
   message: string;
+  paymentLinkIncluded: boolean;
   inProgress: boolean;
   resendWarning: string | null;
 };
@@ -214,7 +215,11 @@ export function SendInvoiceButton({
                   <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap rounded-lg border border-line bg-canvas p-3 font-sans text-xs leading-relaxed text-navy">
                     {preview.message}
                   </pre>
-                  <p className="text-xs text-muted">No PDF is attached and no payment link is included.</p>
+                  <p className="text-xs text-muted">
+                    {preview.paymentLinkIncluded
+                      ? "No PDF is attached. The email includes the client's secure payment link (set APP_URL to a public address for clients outside this computer)."
+                      : "No PDF is attached and no payment link is included (set APP_URL to include one)."}
+                  </p>
 
                   {preview.delivery === "demo" && (
                     <Notice tone="info">Demo mode — the invoice email Zap is not configured, so nothing will be sent and the invoice stays a DRAFT.</Notice>

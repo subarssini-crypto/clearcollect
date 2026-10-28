@@ -30,7 +30,7 @@ import { POST as logout } from "@/app/api/auth/logout/route";
 import { GET as listClients, POST as createClient } from "@/app/api/clients/route";
 import { GET as listInvoices, POST as createInvoice } from "@/app/api/invoices/route";
 import { DELETE as deleteInvoice, GET as getInvoice, PATCH as updateInvoice } from "@/app/api/invoices/[id]/route";
-import { POST as createPaypalOrder } from "@/app/api/invoices/[id]/paypal-order/route";
+import { POST as createPaymentLink } from "@/app/api/invoices/[id]/payment-link/route";
 import { POST as aiDraft } from "@/app/api/ai/invoice-draft/route";
 import { POST as followUpDraft } from "@/app/api/follow-ups/draft/route";
 import { POST as followUpSend } from "@/app/api/follow-ups/send/route";
@@ -38,6 +38,11 @@ import { GET as followUpStatus } from "@/app/api/follow-ups/status/route";
 import { POST as paypalWebhook } from "@/app/api/paypal/webhook/route";
 import { GET as paypalReturn } from "@/app/api/paypal/return/route";
 import { GET as paypalCancel } from "@/app/api/paypal/cancel/route";
+import { PATCH as archiveClient } from "@/app/api/clients/[id]/route";
+import { GET as listReminderDrafts, POST as saveReminderDraftRoute } from "@/app/api/follow-ups/drafts/route";
+import { DELETE as deleteReminderDraftRoute } from "@/app/api/follow-ups/drafts/[id]/route";
+import { GET as listTransactionsRoute } from "@/app/api/transactions/route";
+import { GET as previewInvoiceEmailRoute, POST as sendInvoiceEmailRoute } from "@/app/api/invoices/[id]/send/route";
 import { TEST_AUTH_SECRET, TEST_OWNER_PASSWORD, ownerCookie } from "./auth-helpers";
 import { setEnvVar } from "../scripts/auth-setup";
 
@@ -69,11 +74,18 @@ const protectedRoutes: [string, Call][] = [
   ["GET /api/invoices/[id]", (c) => getInvoice(getRequest(`/api/invoices/${UNKNOWN_ID}`, c), idCtx as never)],
   ["PATCH /api/invoices/[id]", (c) => updateInvoice(jsonRequest(`/api/invoices/${UNKNOWN_ID}`, "PATCH", INVALID_BODY, c), idCtx as never)],
   ["DELETE /api/invoices/[id]", (c) => deleteInvoice(getRequest(`/api/invoices/${UNKNOWN_ID}`, c, "DELETE"), idCtx as never)],
-  ["POST /api/invoices/[id]/paypal-order", (c) => createPaypalOrder(getRequest(`/api/invoices/${UNKNOWN_ID}/paypal-order`, c, "POST"), idCtx as never)],
+  ["POST /api/invoices/[id]/payment-link", (c) => createPaymentLink(getRequest(`/api/invoices/${UNKNOWN_ID}/payment-link`, c, "POST"), idCtx as never)],
   ["POST /api/ai/invoice-draft", (c) => aiDraft(jsonRequest("/api/ai/invoice-draft", "POST", INVALID_BODY, c))],
   ["POST /api/follow-ups/draft", (c) => followUpDraft(jsonRequest("/api/follow-ups/draft", "POST", INVALID_BODY, c))],
   ["POST /api/follow-ups/send", (c) => followUpSend(jsonRequest("/api/follow-ups/send", "POST", INVALID_BODY, c))],
   ["GET /api/follow-ups/status", (c) => followUpStatus(getRequest("/api/follow-ups/status", c))],
+  ["PATCH /api/clients/[id]", (c) => archiveClient(jsonRequest(`/api/clients/${UNKNOWN_ID}`, "PATCH", INVALID_BODY, c), idCtx as never)],
+  ["GET /api/follow-ups/drafts", (c) => listReminderDrafts(getRequest("/api/follow-ups/drafts", c))],
+  ["POST /api/follow-ups/drafts", (c) => saveReminderDraftRoute(jsonRequest("/api/follow-ups/drafts", "POST", INVALID_BODY, c))],
+  ["DELETE /api/follow-ups/drafts/[id]", (c) => deleteReminderDraftRoute(getRequest(`/api/follow-ups/drafts/${UNKNOWN_ID}`, c, "DELETE"), idCtx as never)],
+  ["GET /api/transactions", (c) => listTransactionsRoute(getRequest("/api/transactions", c))],
+  ["GET /api/invoices/[id]/send", (c) => previewInvoiceEmailRoute(getRequest(`/api/invoices/${UNKNOWN_ID}/send`, c), idCtx as never)],
+  ["POST /api/invoices/[id]/send", (c) => sendInvoiceEmailRoute(jsonRequest(`/api/invoices/${UNKNOWN_ID}/send`, "POST", INVALID_BODY, c), idCtx as never)],
 ];
 
 function loginWith(password: unknown, headers: Record<string, string> = {}, url = `${BASE}/api/auth/login`) {
@@ -214,8 +226,8 @@ describe("signed-in owner can still perform permitted actions", () => {
     const patch = jsonRequest(`/api/invoices/${UNKNOWN_ID}`, "PATCH", JSON.stringify({ description: "x" }), cookie);
     assert.equal((await updateInvoice(patch, idCtx as never)).status, 404);
     assert.equal((await deleteInvoice(getRequest(`/api/invoices/${UNKNOWN_ID}`, cookie, "DELETE"), idCtx as never)).status, 404);
-    const order = getRequest(`/api/invoices/${UNKNOWN_ID}/paypal-order`, cookie, "POST");
-    assert.equal((await createPaypalOrder(order, idCtx as never)).status, 404);
+    const link = getRequest(`/api/invoices/${UNKNOWN_ID}/payment-link`, cookie, "POST");
+    assert.equal((await createPaymentLink(link, idCtx as never)).status, 404);
     const draft = jsonRequest("/api/follow-ups/draft", "POST", JSON.stringify({ invoiceId: Number(UNKNOWN_ID) }), cookie);
     assert.equal((await followUpDraft(draft)).status, 404);
     assert.equal((await followUpStatus(getRequest("/api/follow-ups/status", cookie))).status, 200);
@@ -302,7 +314,7 @@ describe("PayPal callbacks work without a browser session", () => {
   test("return and cancel redirect the payer without a session", async () => {
     const ret = await paypalReturn(getRequest("/api/paypal/return?token=bad-token!"));
     assert.equal(ret.status, 303);
-    assert.match(ret.headers.get("location") ?? "", /\/invoices\?payment=error$/);
+    assert.match(ret.headers.get("location") ?? "", /\/pay\/invalid\?payment=error$/);
     const cancel = await paypalCancel(getRequest("/api/paypal/cancel"));
     assert.equal(cancel.status, 303);
   });
@@ -319,10 +331,10 @@ describe("proxy", () => {
     assert.equal(location.searchParams.get("next"), "/invoices?payment=paid&invoice=INV-1");
   });
 
-  test("signed-in page visits pass through; /login redirects home", async () => {
+  test("signed-in page visits pass through; /login redirects to the dashboard", async () => {
     assert.ok(passesThrough(await proxy(getRequest("/follow-ups", cookie))));
     const res = await proxy(getRequest("/login", cookie));
-    assert.equal(new URL(res.headers.get("location")!).pathname, "/");
+    assert.equal(new URL(res.headers.get("location")!).pathname, "/dashboard");
   });
 
   test("signed-out API calls get 401; public endpoints pass through", async () => {
@@ -342,7 +354,7 @@ describe("safeNextPath (no open redirect after login)", () => {
 
   test("rejects external, protocol-relative, and odd targets", () => {
     for (const bad of [null, "", "https://evil.example", "//evil.example", "/\\evil.example", "javascript:alert(1)", "/login", "invoices"]) {
-      assert.equal(safeNextPath(bad), "/", String(bad));
+      assert.equal(safeNextPath(bad), "/dashboard", String(bad));
     }
   });
 });

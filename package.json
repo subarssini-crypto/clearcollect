@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --env-file=.env --experimental-transform-types --no-warnings --import ./tests/register.mjs --test tests/*.test.ts",
+    "test": "node --env-file=.env --experimental-transform-types --no-warnings --import ./tests/register.mjs --test --test-concurrency=1 tests/*.test.ts",
     "test-data:reminder": "node --env-file=.env --experimental-transform-types --no-warnings --import ./tests/register.mjs scripts/create-reminder-test-data.ts",
     "auth:setup": "node --experimental-transform-types --no-warnings --import ./tests/register.mjs scripts/auth-setup.ts"
   },

@@ -143,6 +143,14 @@ describe("composeInvoiceEmail", () => {
     assert.doesNotMatch(`${subject}\n${message}`, /https?:\/\/|www\.|attach|pdf|paypal\.me/i);
   });
 
+  test("with a trusted origin, the secure payment link replaces the manual instruction", () => {
+    const url = "https://pay.example.com/pay/abc";
+    const { message, paymentUrl } = composeInvoiceEmail(record(), url);
+    assert.equal(paymentUrl, url);
+    assert.match(message, /How to pay: please pay USD 1,830\.00 by November 6, 2026\. You can view and pay this invoice securely online: https:\/\/pay\.example\.com\/pay\/abc/);
+    assert.doesNotMatch(message, /attach|pdf/i);
+  });
+
   test("other currencies keep their code; fixed-price lines read naturally", () => {
     const email = composeInvoiceEmail(
       record({ currency: "EUR", amount: "500.00", lineItems: [{ description: "Logo", quantity: 1, rate: 500, unit: "fixed" }] })
@@ -202,6 +210,34 @@ describe("sendInvoiceEmail", () => {
     assert.match(body.line_items, /Web Design/);
     assert.equal(body.send_id, `7-${NOW}`);
     assert.ok(!Object.keys(body).some((k) => /paypal|capture|order/i.test(k)));
+  });
+
+  test("with a payment origin, the payload and message carry the invoice's own secure link", async () => {
+    const store = new MemoryStore(record());
+    let ensured = 0;
+    Object.assign(store, { ensurePaymentToken: async (id: number) => (ensured++, id === 7 ? "tok_for_invoice_7" : null) });
+    const f = ok();
+    const result = await sendInvoiceEmail(7, {}, { ...deps(store, f), paymentOrigin: "https://app.example.com" });
+
+    assert.equal(ensured, 1);
+    const body = JSON.parse(String(f.calls[0].init.body));
+    assert.equal(body.payment_url, "https://app.example.com/pay/tok_for_invoice_7");
+    assert.match(body.message, /https:\/\/app\.example\.com\/pay\/tok_for_invoice_7/);
+    // Zapier acceptance is still never reported as delivery.
+    assert.match(result.detail, /Accepted by Zapier/);
+    assert.doesNotMatch(result.detail, /delivered|email (was )?sent/i);
+  });
+
+  test("without a payment origin no link is invented and no token is created", async () => {
+    const store = new MemoryStore(record());
+    let ensured = 0;
+    Object.assign(store, { ensurePaymentToken: async () => (ensured++, "tok") });
+    const f = ok();
+    await sendInvoiceEmail(7, {}, deps(store, f));
+    assert.equal(ensured, 0);
+    const body = JSON.parse(String(f.calls[0].init.body));
+    assert.equal(body.payment_url, "");
+    assert.doesNotMatch(body.message, /https?:\/\//);
   });
 
   test("the invoice is not SENT while the Zapier request is still running", async () => {

@@ -4,6 +4,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { SendInvoiceButton } from "@/components/SendInvoice";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 type Invoice = {
   id: number;
@@ -28,13 +29,6 @@ type ApiResponse = {
   ok: boolean;
   data?: Invoice[];
   error?: string;
-};
-
-const paymentMessages: Record<string, { text: string; style: string }> = {
-  paid: { text: "Payment received — invoice marked as paid.", style: "bg-emerald-50 text-emerald-700 ring-emerald-200" },
-  pending: { text: "PayPal is still processing this payment. The invoice stays unpaid until it completes.", style: "bg-amber-50 text-amber-700 ring-amber-200" },
-  cancelled: { text: "PayPal payment was cancelled. No changes were made.", style: "bg-canvas text-slate-600 ring-line" },
-  error: { text: "The PayPal payment could not be completed. The invoice was not marked as paid.", style: "bg-red-50 text-red-700 ring-red-200" },
 };
 
 const tabs = ["All", "Paid", "Pending", "Overdue", "Draft"];
@@ -111,28 +105,73 @@ export default function InvoicesPage() {
   const [activeTab, setActiveTab] = useState("All");
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
-  const [payment, setPayment] = useState<{ result: string; invoice: string | null } | null>(null);
-  const [payingId, setPayingId] = useState<number | null>(null);
-  const [payError, setPayError] = useState("");
+  // Clients pay on their public /pay/<token> page; the owner only copies the link.
+  const [linkingId, setLinkingId] = useState<number | null>(null);
+  const [linkError, setLinkError] = useState("");
+  // Draft deletion: the server re-checks eligibility; this is only the prompt.
+  const [deleteTarget, setDeleteTarget] = useState<Invoice | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+  const [notice, setNotice] = useState("");
 
-  async function payWithPaypal(invoice: Invoice) {
-    setPayError("");
-    setPayingId(invoice.id);
+  async function fetchInvoices() {
+    const response = await fetch("/api/invoices", { cache: "no-store" });
+    const result: ApiResponse = await response.json();
+    if (!response.ok || !result.ok || !result.data) {
+      throw new Error(result.error || "Could not load invoices.");
+    }
+    setInvoices(result.data);
+  }
+
+  async function confirmDelete() {
+    if (!deleteTarget || deleting) return;
+    setDeleting(true);
+    setDeleteError("");
     try {
-      const response = await fetch(`/api/invoices/${invoice.id}/paypal-order`, {
-        method: "POST",
-      });
-      const result: { ok: boolean; data?: { approveUrl: string }; error?: string } =
-        await response.json();
-      if (!response.ok || !result.ok || !result.data) {
-        throw new Error(result.error || "Could not start PayPal payment.");
+      const response = await fetch(`/api/invoices/${deleteTarget.id}`, { method: "DELETE" });
+      let result: { ok?: boolean; error?: string; message?: string } = {};
+      try {
+        result = await response.json();
+      } catch {
+        result = { error: `The server returned an unexpected response (HTTP ${response.status}).` };
       }
-      window.location.assign(result.data.approveUrl);
+      if (!response.ok || !result.ok) {
+        // Already gone (e.g. deleted in another tab): drop it from the list.
+        if (response.status === 404) setInvoices((current) => current.filter((inv) => inv.id !== deleteTarget.id));
+        throw new Error(result.error || "The invoice was not deleted.");
+      }
+      setInvoices((current) => current.filter((inv) => inv.id !== deleteTarget.id));
+      setNotice(result.message || `${deleteTarget.invoiceNumber} deleted.`);
+      setDeleteTarget(null);
+      // Re-read from the database so the list reflects any other changes.
+      fetchInvoices().catch(() => {});
     } catch (err) {
-      setPayError(
-        `${invoice.invoiceNumber}: ${err instanceof Error ? err.message : "Could not start PayPal payment."}`
-      );
-      setPayingId(null);
+      setDeleteError(err instanceof Error ? err.message : "The invoice was not deleted.");
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  async function copyPaymentLink(invoice: Invoice) {
+    setLinkError("");
+    setNotice("");
+    setLinkingId(invoice.id);
+    try {
+      const response = await fetch(`/api/invoices/${invoice.id}/payment-link`, { method: "POST" });
+      const result: { ok?: boolean; data?: { url: string }; error?: string } = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok || !result.data) {
+        throw new Error(result.error || "Could not get the payment link.");
+      }
+      try {
+        await navigator.clipboard.writeText(result.data.url);
+        setNotice(`${invoice.invoiceNumber}: payment link copied. Share it only with this client.`);
+      } catch {
+        setNotice(`${invoice.invoiceNumber} payment link (share it only with this client): ${result.data.url}`);
+      }
+    } catch (err) {
+      setLinkError(`${invoice.invoiceNumber}: ${err instanceof Error ? err.message : "Could not get the payment link."}`);
+    } finally {
+      setLinkingId(null);
     }
   }
 
@@ -140,24 +179,7 @@ export default function InvoicesPage() {
     async function loadInvoices() {
       try {
         setError("");
-
-        // Show the result of a PayPal redirect. Display only — the invoice
-        // status in the table always comes from the database.
-        const params = new URLSearchParams(window.location.search);
-        const paymentResult = params.get("payment");
-        if (paymentResult && paymentMessages[paymentResult]) {
-          setPayment({ result: paymentResult, invoice: params.get("invoice") });
-          window.history.replaceState(null, "", window.location.pathname);
-        }
-
-        const response = await fetch("/api/invoices");
-        const result: ApiResponse = await response.json();
-
-        if (!response.ok || !result.ok || !result.data) {
-          throw new Error(result.error || "Could not load invoices.");
-        }
-
-        setInvoices(result.data);
+        await fetchInvoices();
       } catch (err) {
         setError(
           err instanceof Error
@@ -182,12 +204,26 @@ export default function InvoicesPage() {
     setInvoices((current) => current.map((inv) => (inv.id === id ? { ...inv, status: "SENT" } : inv)));
   }
 
-  // Action column: Send for drafts, Pay button for payable invoices, a PayPal
+  // Action column: Send for drafts, Copy pay link for payable invoices, a PayPal
   // badge when a capture is recorded, otherwise a neutral dash (no payment
   // data is invented).
   function renderPayment(invoice: Invoice) {
     return (
       <>
+                        {invoice.status === "DRAFT" && (
+                          <button
+                            type="button"
+                            id={`delete-invoice-${invoice.id}`}
+                            onClick={() => {
+                              setDeleteError("");
+                              setNotice("");
+                              setDeleteTarget(invoice);
+                            }}
+                            className="mr-2 text-xs font-semibold px-3 py-1.5 rounded-lg border border-line text-red-700 hover:bg-red-50 transition-colors"
+                          >
+                            Delete
+                          </button>
+                        )}
                         {invoice.status === "DRAFT" && (
                           <SendInvoiceButton
                             invoiceId={invoice.id}
@@ -199,12 +235,14 @@ export default function InvoicesPage() {
                         )}
                         {(invoice.status === "SENT" || invoice.status === "OVERDUE") && (
                           <button
-                            id={`pay-paypal-${invoice.id}`}
-                            onClick={() => payWithPaypal(invoice)}
-                            disabled={payingId !== null}
-                            className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-brand hover:bg-brand-dark text-white transition-colors disabled:opacity-50"
+                            type="button"
+                            id={`copy-pay-link-${invoice.id}`}
+                            onClick={() => copyPaymentLink(invoice)}
+                            disabled={linkingId !== null}
+                            title="Copy the client's secure payment page link"
+                            className="text-xs font-semibold px-3 py-1.5 rounded-lg border border-brand text-brand hover:bg-brand-50 transition-colors disabled:opacity-50"
                           >
-                            {payingId === invoice.id ? "Redirecting..." : "Pay with PayPal"}
+                            {linkingId === invoice.id ? "Copying..." : "Copy pay link"}
                           </button>
                         )}
                         {invoice.status === "PAID" && invoice.paypalCaptureId && (
@@ -264,18 +302,37 @@ export default function InvoicesPage() {
       </div>
 
       {/* Payment result */}
-      {(payment || payError) && (
-        <div
-          role="status"
-          className={`mb-4 rounded-lg ring-1 p-4 text-sm ${payError ? paymentMessages.error.style : paymentMessages[payment!.result].style}`}
-        >
-          {payError || (
-            <>
-              {payment!.invoice && <span className="font-semibold">{payment!.invoice}: </span>}
-              {paymentMessages[payment!.result].text}
-            </>
-          )}
+      {linkError && (
+        <div role="status" className="mb-4 rounded-lg bg-red-50 p-4 text-sm text-red-700 ring-1 ring-red-200">
+          {linkError}
         </div>
+      )}
+
+      {notice && (
+        <div role="status" className="mb-4 rounded-lg bg-emerald-50 p-4 text-sm text-emerald-700 ring-1 ring-emerald-200">
+          {notice}
+        </div>
+      )}
+
+      {deleteTarget && (
+        <ConfirmDialog
+          id="delete-invoice"
+          title={`Delete draft ${deleteTarget.invoiceNumber}?`}
+          confirmLabel="Delete draft"
+          busyLabel="Deleting…"
+          danger
+          busy={deleting}
+          error={deleteError}
+          onConfirm={confirmDelete}
+          onCancel={() => setDeleteTarget(null)}
+        >
+          <p>
+            <span className="font-semibold text-navy">{deleteTarget.invoiceNumber}</span> for{" "}
+            <span className="font-semibold text-navy">{deleteTarget.client.name}</span> —{" "}
+            {formatAmount(deleteTarget.amount, deleteTarget.currency)}, due {formatDate(deleteTarget.dueDate)}.
+          </p>
+          <p>This permanently deletes the draft. Only drafts that were never emailed, paid, or reminded can be deleted; the server checks this again.</p>
+        </ConfirmDialog>
       )}
 
       {/* Filter tabs */}

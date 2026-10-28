@@ -1,7 +1,8 @@
 /**
  * GET    /api/invoices/[id]  — fetch a single invoice with client details
  * PATCH  /api/invoices/[id]  — update allowed fields (description, amount, currency, dueDate, status)
- * DELETE /api/invoices/[id]  — delete an invoice (only DRAFT or CANCELLED invoices may be deleted)
+ * DELETE /api/invoices/[id]  — delete a DRAFT invoice with no payment, email, or reminder history
+ *                             (see src/lib/invoice-deletion.ts; checked atomically on the server)
  *
  * Security note: PAID status cannot be set via PATCH.
  * Status may only be set to PAID by the verified PayPal capture flow (src/lib/paypal.ts).
@@ -9,7 +10,7 @@
 
 import { requireOwner } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { readJsonBody } from "@/lib/request";
+import { readJsonBody, rejectCrossSite } from "@/lib/request";
 import {
   validateUpdateInvoice,
   validationErrorResponse,
@@ -19,6 +20,7 @@ import {
 import { InvoiceStatus } from "@/generated/prisma/enums";
 import { Prisma } from "@/generated/prisma/client";
 import { isSendInProgress } from "@/lib/invoice-email";
+import { InvoiceDeletionError, deleteDraftInvoice } from "@/lib/invoice-deletion";
 
 const SEND_IN_PROGRESS = "This invoice is being emailed right now; try again in a moment";
 
@@ -26,7 +28,8 @@ const SEND_IN_PROGRESS = "This invoice is being emailed right now; try again in 
 function parseId(ctx: RouteContext<"/api/invoices/[id]">): Promise<number | null> {
   return ctx.params.then(({ id }) => {
     const parsed = parseInt(id, 10);
-    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+    // Digits only: "12abc" or "1.5" must not resolve to another invoice.
+    return /^\d+$/.test(id) && Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
   });
 }
 
@@ -134,32 +137,16 @@ export async function DELETE(
     return Response.json({ ok: false, error: "id must be a positive integer" }, { status: 400 });
   }
 
+  const crossSite = rejectCrossSite(request);
+  if (crossSite) return crossSite;
+
   try {
-    const existing = await prisma.invoice.findUnique({
-      where: { id },
-      select: { id: true, status: true, emailState: true, emailStateAt: true },
-    });
-    if (!existing) return notFoundResponse(`Invoice ${id} not found`);
-
-    if (isSendInProgress(existing, Date.now())) {
-      return Response.json({ ok: false, error: SEND_IN_PROGRESS }, { status: 409 });
-    }
-
-    // Only DRAFT or CANCELLED invoices may be deleted
-    const deletableStatuses: InvoiceStatus[] = [InvoiceStatus.DRAFT, InvoiceStatus.CANCELLED];
-    if (!deletableStatuses.includes(existing.status as InvoiceStatus)) {
-      return Response.json(
-        {
-          ok: false,
-          error: `Only DRAFT or CANCELLED invoices can be deleted. This invoice is ${existing.status}.`,
-        },
-        { status: 409 }
-      );
-    }
-
-    await prisma.invoice.delete({ where: { id } });
-    return Response.json({ ok: true, message: `Invoice ${id} deleted` });
+    const { invoiceNumber } = await deleteDraftInvoice(id);
+    return Response.json({ ok: true, message: `${invoiceNumber} deleted`, data: { id, invoiceNumber } });
   } catch (err) {
+    if (err instanceof InvoiceDeletionError) {
+      return Response.json({ ok: false, error: err.message }, { status: err.status });
+    }
     console.error(`[DELETE /api/invoices/${id}]`, err);
     return serverErrorResponse();
   }

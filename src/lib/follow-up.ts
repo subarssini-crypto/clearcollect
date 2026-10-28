@@ -16,7 +16,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { generateGeminiJson } from "@/lib/ai-invoice";
-import { formatAmount, formatLongDate, getZapierConfig, postToZapier, validRecipient } from "@/lib/zapier";
+import { formatAmount, formatLongDate, getZapierConfig, postToZapier, validRecipient, type ZapierOutcome } from "@/lib/zapier";
 
 export { getZapierConfig, type ZapierConfig } from "@/lib/zapier";
 
@@ -339,7 +339,20 @@ export async function deliverReminder(
   invoice: ReminderInvoice,
   input: SendReminderInput,
   now: number,
-  options: { env?: Record<string, string | undefined>; fetchImpl?: typeof fetch; guard?: ReminderSendGuard } = {}
+  options: {
+    env?: Record<string, string | undefined>;
+    fetchImpl?: typeof fetch;
+    guard?: ReminderSendGuard;
+    /**
+     * Records real sends (src/lib/reminder-drafts.ts). `begin` runs right
+     * before the Zapier request and may refuse (e.g. the draft was deleted);
+     * `finish` records the outcome. Never called in demo/misconfigured mode.
+     */
+    audit?: {
+      begin(recipient: string, now: Date): Promise<void>;
+      finish(outcome: ZapierOutcome["kind"], now: Date): Promise<void>;
+    };
+  } = {}
 ): Promise<DeliveryResult> {
   const recipientEmail = reminderRecipient(invoice);
   assertReminderMatchesInvoice(invoice, input);
@@ -354,8 +367,18 @@ export async function deliverReminder(
 
   const guard = options.guard ?? sharedGuard;
   guard.begin(invoice, now);
+  if (options.audit) {
+    try {
+      await options.audit.begin(recipientEmail, new Date(now));
+    } catch (err) {
+      guard.finish(invoice.id, now, false); // nothing was sent
+      throw err;
+    }
+  }
   const payload = buildZapierPayload(invoice, input, reminderFacts(invoice, now), config.secret, now, recipientEmail);
   const outcome = await postToZapier(config, payload, { fetchImpl: options.fetchImpl, logLabel: "follow-up" });
+  // Recording the outcome must not change what the user is told about delivery.
+  await options.audit?.finish(outcome.kind, new Date()).catch((err) => console.error("[follow-up] recording reminder outcome failed", err));
   if (outcome.kind === "timeout") {
     // The request may have reached Zapier before the timeout, and the Zap
     // may have sent the email — never report that as "not sent".

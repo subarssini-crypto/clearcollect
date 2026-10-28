@@ -13,7 +13,8 @@ import assert from "node:assert/strict";
 import { POST as createClient } from "@/app/api/clients/route";
 import { POST as createInvoice } from "@/app/api/invoices/route";
 import { PATCH as updateInvoice } from "@/app/api/invoices/[id]/route";
-import { POST as createPaypalOrder } from "@/app/api/invoices/[id]/paypal-order/route";
+import { POST as createPaymentLink } from "@/app/api/invoices/[id]/payment-link/route";
+import { POST as createPublicOrder } from "@/app/api/pay/[token]/order/route";
 import { POST as aiDraft } from "@/app/api/ai/invoice-draft/route";
 import { POST as followUpDraft } from "@/app/api/follow-ups/draft/route";
 import { POST as followUpSend } from "@/app/api/follow-ups/send/route";
@@ -94,13 +95,21 @@ describe("JSON API routes reject cross-site and non-JSON requests (CSRF)", () =>
     });
   }
 
-  test("POST /api/invoices/[id]/paypal-order: cross-site request → 403 before any lookup", async () => {
-    const res = await createPaypalOrder(
-      new Request("http://localhost:3000/api/invoices/1/paypal-order", {
+  test("POST /api/invoices/[id]/payment-link: cross-site request → 403 before any lookup", async () => {
+    const res = await createPaymentLink(
+      new Request("http://localhost:3000/api/invoices/1/payment-link", {
         method: "POST",
         headers: { "sec-fetch-site": "cross-site", cookie: COOKIE },
       }),
       idCtx as never
+    );
+    assert.equal(res.status, 403);
+  });
+
+  test("POST /api/pay/[token]/order: cross-site request → 403 before any lookup", async () => {
+    const res = await createPublicOrder(
+      new Request("http://localhost:3000/api/pay/x/order", { method: "POST", headers: { "sec-fetch-site": "cross-site" } }),
+      { params: Promise.resolve({ token: "x" }) } as never
     );
     assert.equal(res.status, 403);
   });
@@ -175,16 +184,21 @@ describe("getPaymentReturnOrigin (PayPal return URLs must not come from the Host
     }
   });
 
-  test("the paypal-order route refuses a spoofed Host before creating any order", async () => {
+  test("payment-link and public order routes refuse a spoofed Host before any lookup or order", async () => {
     const saved = process.env.APP_URL;
     delete process.env.APP_URL;
     try {
-      const res = await createPaypalOrder(
-        new Request("https://evil.example/api/invoices/1/paypal-order", { method: "POST", headers: { cookie: COOKIE } }),
+      const link = await createPaymentLink(
+        new Request("https://evil.example/api/invoices/1/payment-link", { method: "POST", headers: { cookie: COOKIE } }),
         idCtx as never
       );
-      assert.equal(res.status, 500);
-      assert.match(((await res.json()) as { error: string }).error, /APP_URL/);
+      assert.equal(link.status, 500);
+      assert.match(((await link.json()) as { error: string }).error, /APP_URL/);
+      const order = await createPublicOrder(
+        new Request("https://evil.example/api/pay/x/order", { method: "POST" }),
+        { params: Promise.resolve({ token: "x" }) } as never
+      );
+      assert.equal(order.status, 500);
     } finally {
       if (saved !== undefined) process.env.APP_URL = saved;
     }

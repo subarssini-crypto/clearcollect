@@ -4,6 +4,9 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { displayStatus, type DashboardInvoice } from "@/lib/dashboard-metrics";
 import { Avatar, Notice, PageHeader, Page, btnPrimary, btnSecondary, inputClass } from "@/components/ui";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+
+type SavedDraft = { id: number; invoiceId: number; subject: string; message: string };
 
 type ApiList<T> = { ok: boolean; data?: T[]; error?: string; meta?: { pages: number } };
 
@@ -90,7 +93,12 @@ export default function FollowUpsPage() {
   const [subjects, setSubjects] = useState<Record<number, string>>({});
   const [drafts, setDrafts] = useState<Record<number, string>>({});
   const [openId, setOpenId] = useState<number | null>(null);
-  const [busy, setBusy] = useState<{ id: number; action: "draft" | "send" } | null>(null);
+  const [busy, setBusy] = useState<{ id: number; action: "draft" | "send" | "save" } | null>(null);
+  // Saved (server-side) unsent draft per invoice: invoiceId → draft id.
+  const [draftIds, setDraftIds] = useState<Record<number, number>>({});
+  const [deleteTarget, setDeleteTarget] = useState<{ item: FollowUp; draftId: number } | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const [outcomes, setOutcomes] = useState<Record<number, Outcome>>({});
   const [sentIds, setSentIds] = useState<Set<number>>(new Set());
   const [dismissedIds, setDismissedIds] = useState<Set<number>>(new Set());
@@ -109,6 +117,18 @@ export default function FollowUpsPage() {
       .then((res) => readJson<{ ok: boolean; data?: { delivery: Delivery } }>(res))
       .then((json) => !cancelled && setDelivery(json.ok && json.data ? json.data.delivery : "unknown"))
       .catch(() => !cancelled && setDelivery("unknown"));
+    // Saved drafts prefill the editors (newest per invoice).
+    fetch("/api/follow-ups/drafts", { cache: "no-store" })
+      .then((res) => readJson<{ ok: boolean; data?: SavedDraft[] }>(res))
+      .then((json) => {
+        if (cancelled || !json.ok || !json.data) return;
+        const latest = new Map<number, SavedDraft>();
+        for (const d of json.data) if (!latest.has(d.invoiceId)) latest.set(d.invoiceId, d);
+        setDraftIds(Object.fromEntries([...latest].map(([invoiceId, d]) => [invoiceId, d.id])));
+        setSubjects((prev) => ({ ...Object.fromEntries([...latest].map(([invoiceId, d]) => [invoiceId, d.subject])), ...prev }));
+        setDrafts((prev) => ({ ...Object.fromEntries([...latest].map(([invoiceId, d]) => [invoiceId, d.message])), ...prev }));
+      })
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -180,13 +200,21 @@ export default function FollowUpsPage() {
       const res = await fetch("/api/follow-ups/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ invoiceId: id, subject: subjectFor(item), message: messageFor(item) }),
+        body: JSON.stringify({
+          invoiceId: id,
+          subject: subjectFor(item),
+          message: messageFor(item),
+          ...(draftIds[id] ? { draftId: draftIds[id] } : {}),
+        }),
       });
       const json = await readJson<{ ok: boolean; data?: { mode: "demo" | "zapier"; delivered: boolean; detail: string } }>(res);
+      // After a timeout the draft is kept as uncertain history, not as a draft.
+      if (res.status === 504) forgetDraft(id);
       if (!res.ok || !json.ok || !json.data) {
         throw new Error(json.errors?.map((e) => e.message).join(" ") || json.error || "The reminder was not sent.");
       }
       if (json.data.delivered) {
+        forgetDraft(id); // it is now send history
         setSentIds((prev) => new Set(prev).add(id));
         setOutcome(id, { tone: "success", text: json.data.detail });
       } else {
@@ -197,6 +225,78 @@ export default function FollowUpsPage() {
     } finally {
       sendingRef.current.delete(id);
       setBusy(null);
+    }
+  }
+
+  function forgetDraft(invoiceId: number) {
+    setDraftIds((prev) => {
+      const next = { ...prev };
+      delete next[invoiceId];
+      return next;
+    });
+  }
+
+  async function saveDraft(item: FollowUp) {
+    const id = item.invoice.id;
+    setBusy({ id, action: "save" });
+    setOutcome(id, null);
+    try {
+      const res = await fetch("/api/follow-ups/drafts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          invoiceId: id,
+          subject: subjectFor(item),
+          message: messageFor(item),
+          ...(draftIds[id] ? { draftId: draftIds[id] } : {}),
+        }),
+      });
+      const json = await readJson<{ ok: boolean; data?: { id: number }; message?: string }>(res);
+      if (!res.ok || !json.ok || !json.data) {
+        if (res.status === 409) forgetDraft(id); // no longer an unsent draft
+        throw new Error(json.errors?.map((e) => e.message).join(" ") || json.error || "The draft was not saved.");
+      }
+      const draftId = json.data.id;
+      setDraftIds((prev) => ({ ...prev, [id]: draftId }));
+      setOutcome(id, { tone: "info", text: json.message || "Draft saved. Nothing was sent." });
+    } catch (err) {
+      setOutcome(id, { tone: "error", text: err instanceof Error ? err.message : "The draft was not saved." });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function confirmDeleteDraft() {
+    if (!deleteTarget || deleting) return;
+    const { item, draftId } = deleteTarget;
+    const id = item.invoice.id;
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      const res = await fetch(`/api/follow-ups/drafts/${draftId}`, { method: "DELETE" });
+      const json = await readJson<{ ok: boolean; message?: string }>(res);
+      if (!res.ok || !json.ok) {
+        if (res.status === 404) forgetDraft(id); // already gone
+        throw new Error(json.error || "The draft was not deleted.");
+      }
+      forgetDraft(id);
+      // Back to the plain template built from the invoice.
+      setSubjects((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      setDrafts((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      setOutcome(id, { tone: "success", text: json.message || "Draft deleted. No reminder was sent." });
+      setDeleteTarget(null);
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "The draft was not deleted.");
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -236,7 +336,29 @@ export default function FollowUpsPage() {
         <Notice tone="error">{error}</Notice>
       ) : !data ? (
         <div className="card p-8 text-center text-[13px] text-muted">Loading invoices…</div>
-      ) : visible.length === 0 ? (
+      ) : null}
+
+      {deleteTarget && (
+        <ConfirmDialog
+          id="delete-reminder-draft"
+          title={`Delete the reminder draft for ${deleteTarget.item.invoice.invoiceNumber}?`}
+          confirmLabel="Delete draft"
+          busyLabel="Deleting…"
+          danger
+          busy={deleting}
+          error={deleteError}
+          onConfirm={confirmDeleteDraft}
+          onCancel={() => setDeleteTarget(null)}
+        >
+          <p>
+            The saved, unsent reminder to <span className="font-semibold text-navy">{deleteTarget.item.invoice.client.name}</span> for{" "}
+            <span className="font-semibold text-navy">{deleteTarget.item.invoice.invoiceNumber}</span> will be deleted. The invoice is not changed.
+          </p>
+          <p>Reminders that were sent, are being sent, or have an uncertain outcome are kept as history and cannot be deleted.</p>
+        </ConfirmDialog>
+      )}
+
+      {error || !data ? null : visible.length === 0 ? (
         <div className="card p-8 text-center">
           <p className="text-sm font-semibold text-navy">No follow-ups needed</p>
           <p className="mt-1 text-[13px] text-muted">No unpaid invoices are overdue or due within the next {DUE_SOON_DAYS} days.</p>
@@ -315,6 +437,32 @@ export default function FollowUpsPage() {
                       <Notice tone={outcome.tone === "success" ? "success" : outcome.tone === "error" ? "error" : "info"}>{outcome.text}</Notice>
                     )}
                     <div className="flex flex-wrap items-center justify-end gap-2">
+                      {draftIds[id] && !sent && (
+                        <span className="mr-auto text-[11px] font-medium text-muted">Saved draft (not sent)</span>
+                      )}
+                      {draftIds[id] && !sent && (
+                        <button
+                          id={`delete-draft-${id}`}
+                          onClick={() => {
+                            setDeleteError("");
+                            setDeleteTarget({ item, draftId: draftIds[id] });
+                          }}
+                          disabled={isBusy}
+                          className="rounded-lg px-3 py-1.5 text-xs font-semibold text-red-700 transition-colors hover:bg-red-50 disabled:opacity-50"
+                        >
+                          Delete draft
+                        </button>
+                      )}
+                      {!sent && (
+                        <button
+                          id={`save-draft-${id}`}
+                          onClick={() => saveDraft(item)}
+                          disabled={isBusy}
+                          className={`${btnSecondary} !px-3 !py-1.5 !text-xs`}
+                        >
+                          {isBusy && busy?.action === "save" ? "Saving…" : "Save draft"}
+                        </button>
+                      )}
                       <button
                         id={`draft-ai-${id}`}
                         onClick={() => draftWithAi(item)}

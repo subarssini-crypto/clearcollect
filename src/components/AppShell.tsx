@@ -24,7 +24,7 @@ const ICONS = {
 };
 
 const NAV: NavItem[] = [
-  { href: "/", label: "Dashboard", icon: ICONS.dashboard },
+  { href: "/dashboard", label: "Dashboard", icon: ICONS.dashboard },
   { href: "/invoices", label: "Invoices", icon: ICONS.invoices },
   { href: "/transactions", label: "Transactions", icon: ICONS.transactions, sidebarOnly: true },
   { href: "/create-invoice", label: "Create Invoice", icon: ICONS.create },
@@ -44,7 +44,7 @@ function Icon({ paths, className = "h-[18px] w-[18px]" }: { paths: string[]; cla
 }
 
 function isActive(pathname: string, href: string) {
-  return href === "/" ? pathname === "/" : pathname.startsWith(href);
+  return pathname === href || pathname.startsWith(`${href}/`);
 }
 
 const railTooltip =
@@ -119,8 +119,14 @@ export default function AppShell({ children }: { children: ReactNode }) {
   // Desktop rail: icon-only by default on every load.
   const [railExpanded, setRailExpanded] = useState(false);
 
-  // The login page renders without app navigation.
-  if (pathname === "/login") {
+  // The landing page, owner login, and Customer Portal bring their own header
+  // (PublicHeader) and never show owner navigation.
+  if (pathname === "/" || pathname === "/login" || pathname === "/portal" || pathname.startsWith("/portal/")) {
+    return <main className="h-full overflow-y-auto bg-canvas">{children}</main>;
+  }
+
+  // Clients' public payment pages render without app navigation.
+  if (pathname.startsWith("/pay/")) {
     return (
       <main className="relative h-full overflow-y-auto bg-canvas">
         <ThemeToggle className="absolute right-4 top-4 z-10" />
@@ -133,7 +139,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
     <div className="flex h-full flex-col bg-canvas">
       {/* Top navigation */}
       <header className="relative z-40 flex h-14 flex-shrink-0 items-center border-b border-line bg-surface px-4 sm:px-6">
-        <Link href="/" className="flex w-auto items-center gap-2 md:w-44 lg:w-52" onClick={() => setMenuOpen(false)}>
+        <Link href="/dashboard" className="flex w-auto items-center gap-2 md:w-44 lg:w-52" onClick={() => setMenuOpen(false)}>
           <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand">
             <svg className="h-4 w-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />

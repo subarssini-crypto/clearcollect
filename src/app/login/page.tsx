@@ -1,8 +1,10 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState, type FormEvent } from "react";
 import { safeNextPath } from "@/lib/safe-redirect";
 import { btnPrimary, inputClass, labelClass } from "@/components/ui";
+import PublicHeader from "@/components/PublicHeader";
 
 /** "checking" until /api/auth/status answers; "unknown" if it cannot be reached. */
 type SetupState = "checking" | "configured" | "missing" | "unknown";
@@ -72,78 +74,90 @@ export default function LoginPage() {
   const setupMissing = setup === "missing";
 
   return (
-    <div className="flex min-h-full items-center justify-center px-4 py-10">
-      <div className="w-full max-w-sm space-y-3">
-        <form onSubmit={handleSubmit} className="card p-6">
-          <div className="mb-4 flex items-center gap-2">
-            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand">
-              <svg className="h-4 w-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-            </span>
-            <div>
-              <h1 className="text-base font-bold tracking-tight text-navy">ClearCollect</h1>
-              <p className="text-xs text-muted">Owner sign-in</p>
+    <>
+      <PublicHeader>
+        <Link href="/" className="hidden rounded-lg px-3 py-1.5 text-[13px] font-semibold text-slate-500 hover:text-navy sm:inline">
+          Home
+        </Link>
+      </PublicHeader>
+      <div className="flex min-h-[calc(100%-3.5rem)] items-center justify-center px-4 py-10">
+        <div className="w-full max-w-sm space-y-3">
+          <form onSubmit={handleSubmit} className="card p-6">
+            <div className="mb-4 flex items-center gap-2">
+              <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand">
+                <svg className="h-4 w-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </span>
+              <div>
+                <h1 className="text-base font-bold tracking-tight text-navy">ClearCollect</h1>
+                <p className="text-xs text-muted">Owner sign-in</p>
+              </div>
             </div>
-          </div>
 
-          <p className="mb-4 rounded-lg bg-canvas px-3 py-2 text-xs leading-relaxed text-slate-600">
-            This is a <strong className="text-navy">single-owner demo</strong>: one owner password protects all
-            data. There is <strong className="text-navy">no public registration</strong> — the owner password is
-            created on the server with <code className="font-mono">npm run auth:setup</code>.
-          </p>
-
-          {setupMissing ? (
-            <div role="alert" className="rounded-lg bg-amber-50 px-3 py-2.5 ring-1 ring-amber-200">
-              <p className="text-xs font-semibold text-amber-800">Setup required</p>
-              <p className="mt-0.5 text-xs text-amber-800">
-                Owner sign-in is not configured on this server yet, so nobody can sign in. To set it up:
-              </p>
-              <SetupInstructions />
-            </div>
-          ) : (
-            <>
-              <label htmlFor="login-password" className={labelClass}>
-                Owner password
-              </label>
-              <input
-                id="login-password"
-                type="password"
-                autoComplete="current-password"
-                autoFocus
-                required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className={inputClass}
-              />
-
-              {error && (
-                <p role="alert" className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs font-medium text-red-700">
-                  {error}
-                </p>
-              )}
-
-              <button
-                type="submit"
-                disabled={submitting || password.length === 0 || setup === "checking"}
-                className={`${btnPrimary} mt-4 w-full`}
-              >
-                {submitting ? "Signing in…" : "Sign in"}
-              </button>
-            </>
-          )}
-        </form>
-
-        {!setupMissing && (
-          <details className="card px-4 py-3 text-xs text-slate-600">
-            <summary className="cursor-pointer font-semibold text-navy">First time here? Set up the owner password</summary>
-            <SetupInstructions />
-            <p className="mt-2 text-[11px] text-slate-500">
-              Forgot the password? Run the command again; it replaces the password and signs out every session.
+            <p className="mb-4 rounded-lg bg-canvas px-3 py-2 text-xs leading-relaxed text-slate-600">
+              This is a <strong className="text-navy">single-owner demo</strong>: one owner password protects all
+              data. There is <strong className="text-navy">no public owner registration</strong> — the owner password is
+              created on the server with <code className="font-mono">npm run auth:setup</code>. Customers paying an invoice
+              use the{" "}
+              <Link href="/portal/login" className="font-semibold text-brand hover:text-brand-ink">
+                Customer Portal
+              </Link>{" "}
+              instead.
             </p>
-          </details>
-        )}
+
+            {setupMissing ? (
+              <div role="alert" className="rounded-lg bg-amber-50 px-3 py-2.5 ring-1 ring-amber-200">
+                <p className="text-xs font-semibold text-amber-800">Setup required</p>
+                <p className="mt-0.5 text-xs text-amber-800">
+                  Owner sign-in is not configured on this server yet, so nobody can sign in. To set it up:
+                </p>
+                <SetupInstructions />
+              </div>
+            ) : (
+              <>
+                <label htmlFor="login-password" className={labelClass}>
+                  Owner password
+                </label>
+                <input
+                  id="login-password"
+                  type="password"
+                  autoComplete="current-password"
+                  autoFocus
+                  required
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className={inputClass}
+                />
+
+                {error && (
+                  <p role="alert" className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs font-medium text-red-700">
+                    {error}
+                  </p>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={submitting || password.length === 0 || setup === "checking"}
+                  className={`${btnPrimary} mt-4 w-full`}
+                >
+                  {submitting ? "Signing in…" : "Sign in"}
+                </button>
+              </>
+            )}
+          </form>
+
+          {!setupMissing && (
+            <details className="card px-4 py-3 text-xs text-slate-600">
+              <summary className="cursor-pointer font-semibold text-navy">First time here? Set up the owner password</summary>
+              <SetupInstructions />
+              <p className="mt-2 text-[11px] text-slate-500">
+                Forgot the password? Run the command again; it replaces the password and signs out every session.
+              </p>
+            </details>
+          )}
+        </div>
       </div>
-    </div>
+    </>
   );
 }

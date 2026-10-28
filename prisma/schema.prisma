@@ -1,4 +1,3 @@
-
 generator client {
   provider = "prisma-client"
   output   = "../src/generated/prisma"
@@ -10,48 +9,58 @@ datasource db {
 }
 
 model Client {
-  id        Int       @id @default(autoincrement())
-  name      String
-  email     String?
-  company   String?
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  invoices  Invoice[]
+  id              Int              @id @default(autoincrement())
+  name            String
+  email           String?
+  company         String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  // Archived clients keep all invoices and history but are hidden from client
+  // selection for new invoices. Null = active.
+  archivedAt      DateTime?
+  invoices        Invoice[]
+  customers       Customer[]
+  customerInvites CustomerInvite[]
 }
 
 model Invoice {
-  id             Int           @id @default(autoincrement())
-  invoiceNumber  String        @unique
-  clientId       Int
-  description    String        @db.Text
-  amount         Decimal       @db.Decimal(10, 2)
-  currency       String        @default("USD") @db.VarChar(3)
-  issueDate      DateTime      @default(now())
-  dueDate        DateTime
-  status         InvoiceStatus @default(DRAFT)
+  id            Int           @id @default(autoincrement())
+  invoiceNumber String        @unique
+  clientId      Int
+  description   String        @db.Text
+  amount        Decimal       @db.Decimal(10, 2)
+  currency      String        @default("USD") @db.VarChar(3)
+  issueDate     DateTime      @default(now())
+  dueDate       DateTime
+  status        InvoiceStatus @default(DRAFT)
 
   // [{ description, quantity, rate, unit? }] as entered on Create Invoice.
   // Null for older invoices; their emails show the description and total.
-  lineItems      Json?
+  lineItems Json?
 
   // Invoice email workflow (see src/lib/invoice-email.ts). Status changes to
   // SENT only once Zapier accepts the email.
-  emailState     InvoiceEmailState?
-  emailStateAt   DateTime?
+  emailState   InvoiceEmailState?
+  emailStateAt DateTime?
 
   // PayPal payment tracking
-  paypalOrderId   String?      @unique
-  paypalCaptureId String?      @unique
+  paypalOrderId     String?             @unique
+  paypalCaptureId   String?             @unique
   // Set together with paypalCaptureId, only after server-side verification of a
   // COMPLETED capture (src/lib/paypal.ts). Null for invoices paid before these
   // columns existed — shown as "Unavailable", never back-filled with guesses.
   paidAt            DateTime?
   paypalEnvironment PaymentEnvironment?
 
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
+  // Unguessable token for the client's public payment page (/pay/<token>,
+  // see src/lib/payment-link.ts). Created on first use; null until then.
+  paymentToken String? @unique @db.VarChar(64)
 
-  client         Client        @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  client    Client             @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  reminders FollowUpReminder[]
 
   @@index([clientId])
   @@index([status, dueDate])
@@ -74,4 +83,90 @@ enum InvoiceStatus {
   PAID
   OVERDUE
   CANCELLED
+}
+
+// Payment reminders (Follow-ups). DRAFT rows are saved, unsent drafts and are
+// the only rows that can be deleted. Every real send is kept as history:
+// SENDING (handed to Zapier, awaiting the answer), UNKNOWN (Zapier timed out),
+// SENT (Zapier accepted), FAILED (Zapier refused or was unreachable). Invoices
+// with reminder rows cannot be deleted (onDelete: Restrict).
+model FollowUpReminder {
+  id            Int            @id @default(autoincrement())
+  invoiceId     Int
+  status        FollowUpStatus @default(DRAFT)
+  subject       String         @db.VarChar(200)
+  message       String         @db.Text
+  recipient     String?        @db.VarChar(191) // set when sending, from the client record
+  sendStartedAt DateTime?
+  sentAt        DateTime?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+
+  @@index([invoiceId, status])
+}
+
+enum FollowUpStatus {
+  DRAFT
+  SENDING
+  UNKNOWN
+  SENT
+  FAILED
+}
+
+// Customer Portal accounts (src/lib/customer-auth.ts). Separate from the single
+// owner login. An account sees invoices only once it is linked to a Client,
+// and linking happens only by redeeming an owner-issued CustomerInvite — never
+// by matching email addresses.
+model Customer {
+  id             Int       @id @default(autoincrement())
+  email          String    @unique @db.VarChar(191) // trimmed, lower-case
+  name           String    @db.VarChar(100)
+  passwordHash   String    @db.VarChar(255)
+  // Bumped on logout so every existing session cookie stops working.
+  sessionVersion Int       @default(0)
+  clientId       Int?
+  linkedAt       DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  client  Client?          @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  invites CustomerInvite[]
+
+  @@index([clientId])
+}
+
+// Single-use, expiring invite that links one Customer account to one Client.
+// Only a SHA-256 hash of the invite token is stored (src/lib/customer-invites.ts).
+model CustomerInvite {
+  id                Int               @id @default(autoincrement())
+  clientId          Int
+  tokenHash         String            @unique @db.Char(64)
+  expiresAt         DateTime
+  usedAt            DateTime?
+  usedByCustomerId  Int?
+  revokedAt         DateTime?
+  // Equals clientId while the invite is pending and null otherwise; the unique
+  // index allows at most one pending invite per client, even under concurrent clicks.
+  activeForClientId Int?              @unique
+  // Invitation email via Zapier (src/lib/customer-invite-email.ts). ACCEPTED means
+  // Zapier accepted the request, not that the email was delivered.
+  emailState        InviteEmailState?
+  emailStateAt      DateTime?
+  emailRecipient    String?           @db.VarChar(191)
+  createdAt         DateTime          @default(now())
+
+  client Client    @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  usedBy Customer? @relation(fields: [usedByCustomerId], references: [id], onDelete: Restrict)
+
+  @@index([clientId])
+  @@index([usedByCustomerId])
+}
+
+enum InviteEmailState {
+  SENDING // handed to Zapier, awaiting the answer
+  ACCEPTED // Zapier accepted the request (Gmail delivery happens in the Zap)
+  UNKNOWN // Zapier timed out: the email may or may not have been sent
+  FAILED // Zapier refused the request or was unreachable: not sent
 }

@@ -102,6 +102,11 @@ function passwordVersion(passwordHash: string): string {
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
+/** Session cookies are Secure everywhere except plain-http loopback development. */
+export function secureCookieFor(requestUrl: string): boolean {
+  return !LOOPBACK_HOSTS.has(new URL(requestUrl).hostname);
+}
+
 function sessionOptions(config: { secret: string }, requestUrl: string): SessionOptions {
   return {
     cookieName: SESSION_COOKIE,

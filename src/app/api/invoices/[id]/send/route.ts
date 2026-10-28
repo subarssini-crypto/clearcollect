@@ -15,6 +15,21 @@ import { requireOwner } from "@/lib/auth";
 import { readJsonBody } from "@/lib/request";
 import { serverErrorResponse } from "@/lib/validation";
 import { InvoiceEmailError, previewInvoiceEmail, sendInvoiceEmail } from "@/lib/invoice-email";
+import { getPaymentReturnOrigin } from "@/lib/paypal";
+
+/**
+ * Trusted origin for the payment link in the email (APP_URL, or localhost in
+ * development — never the Host header). Null means the email goes out
+ * without a link rather than with one the client cannot open.
+ */
+function paymentOrigin(request: Request): string | null {
+  try {
+    return getPaymentReturnOrigin(request.url);
+  } catch {
+    console.warn("[invoice-email] APP_URL is not set; sending without a payment link");
+    return null;
+  }
+}
 
 async function parseId(ctx: RouteContext<"/api/invoices/[id]/send">): Promise<number | null> {
   const { id } = await ctx.params;
@@ -38,7 +53,7 @@ export async function GET(request: Request, ctx: RouteContext<"/api/invoices/[id
   if (id === null) return Response.json({ ok: false, error: "id must be a positive integer" }, { status: 400 });
 
   try {
-    return Response.json({ ok: true, data: await previewInvoiceEmail(id) });
+    return Response.json({ ok: true, data: await previewInvoiceEmail(id, { paymentOrigin: paymentOrigin(request) }) });
   } catch (err) {
     return errorResponse(err, `[GET /api/invoices/${id}/send]`);
   }
@@ -63,7 +78,7 @@ export async function POST(request: Request, ctx: RouteContext<"/api/invoices/[i
   }
 
   try {
-    return Response.json({ ok: true, data: await sendInvoiceEmail(id, { confirmResend: confirmResend === true }) });
+    return Response.json({ ok: true, data: await sendInvoiceEmail(id, { confirmResend: confirmResend === true }, { paymentOrigin: paymentOrigin(request) }) });
   } catch (err) {
     return errorResponse(err, `[POST /api/invoices/${id}/send]`);
   }
