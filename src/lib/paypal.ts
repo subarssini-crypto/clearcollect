@@ -5,6 +5,8 @@
  * PayPal's API directly — never from the browser. Only this module may set
  * an invoice to PAID, and only after verifying a COMPLETED capture whose
  * order, invoice reference, amount, and currency all match the invoice.
+ * Any failed check on PayPal-verified data holds the payment for owner review
+ * (src/lib/payment-risk.ts) instead of marking it paid.
  *
  * Never import this file from a client component.
  */
@@ -24,9 +26,20 @@ import {
 } from "@paypal/paypal-server-sdk";
 import { prisma } from "@/lib/prisma";
 import { InvoiceStatus } from "@/generated/prisma/enums";
+import {
+  PAYABLE_STATUSES,
+  checkCapture,
+  checkInvoiceTotals,
+  invoiceStateChangedFlag,
+  orderMismatchFlag,
+  prismaReviewStore,
+  reviewRows,
+  type ReviewContext,
+  type ReviewStore,
+  type RiskFlag,
+} from "@/lib/payment-risk";
 
-/** Invoice statuses that may be paid via PayPal. */
-export const PAYABLE_STATUSES: InvoiceStatus[] = [InvoiceStatus.SENT, InvoiceStatus.OVERDUE];
+export { PAYABLE_STATUSES };
 
 /** PayPal currencies that do not support decimals. */
 const ZERO_DECIMAL_CURRENCIES = new Set(["JPY", "HUF", "TWD"]);
@@ -75,6 +88,34 @@ export class PaymentError extends Error {
   constructor(message: string, public status = 400) {
     super(message);
   }
+}
+
+/** The payment was held for owner review; the review row is already stored. */
+export class PaymentHoldError extends PaymentError {
+  constructor(public flags: RiskFlag[]) {
+    super(`Payment held for review: ${flags.map((f) => f.code).join(", ")}`, 409);
+  }
+}
+
+/**
+ * Durably records the flags, then throws PaymentHoldError. If recording fails
+ * the error is a 503 (transient) so webhook callers return 5xx and PayPal retries.
+ */
+export async function holdPayment(flags: RiskFlag[], ctx: ReviewContext, reviews: ReviewStore): Promise<never> {
+  try {
+    await reviews.save(reviewRows(flags, ctx));
+  } catch (err) {
+    console.error("[paypal] could not record payment review", err);
+    throw new PaymentError("Payment needs review but the review could not be recorded", 503);
+  }
+  console.warn(`[paypal] payment held: ${flags.map((f) => f.code).join(", ")} (order ${ctx.orderId ?? "?"})`);
+  throw new PaymentHoldError(flags);
+}
+
+/** True for a Prisma unique-constraint error on paypalCaptureId. */
+function isCaptureIdConflict(err: unknown): boolean {
+  if ((err as { code?: unknown } | null)?.code !== "P2002") return false;
+  return String((err as { meta?: { target?: unknown } }).meta?.target ?? "").includes("paypalCaptureId");
 }
 
 function paypalIssue(err: unknown): string | undefined {
@@ -152,6 +193,9 @@ export async function createOrderForInvoice(
   }
   if (!PAYABLE_STATUSES.includes(invoice.status)) {
     throw new PaymentError(`A ${invoice.status} invoice cannot be paid`, 409);
+  }
+  if (checkInvoiceTotals(invoice).length > 0) {
+    throw new PaymentError("This invoice's total could not be verified; please contact the sender", 409);
   }
 
   const orders = getOrdersController();
@@ -246,6 +290,8 @@ export async function createOrderForInvoice(
 export type CaptureOutcome = {
   status: "paid" | "pending";
   invoiceNumber: string;
+  /** True when the invoice was already PAID with this capture: nothing was written. */
+  alreadyPaid?: boolean;
 };
 
 /**
@@ -253,24 +299,49 @@ export type CaptureOutcome = {
  * verifying the completed capture against the invoice stored in MySQL.
  * Safe to call repeatedly for the same order.
  */
-export async function captureOrderForInvoice(orderId: string): Promise<CaptureOutcome> {
+export async function captureOrderForInvoice(
+  orderId: string,
+  reviews: ReviewStore = prismaReviewStore
+): Promise<CaptureOutcome> {
   const invoice = await prisma.invoice.findUnique({ where: { paypalOrderId: orderId } });
   if (!invoice) throw new PaymentError("No invoice is associated with this PayPal order", 404);
 
   if (invoice.status === InvoiceStatus.PAID && invoice.paypalCaptureId) {
-    return { status: "paid", invoiceNumber: invoice.invoiceNumber };
-  }
-  if (!PAYABLE_STATUSES.includes(invoice.status)) {
-    throw new PaymentError(`A ${invoice.status} invoice cannot be paid`, 409);
+    return { status: "paid", invoiceNumber: invoice.invoiceNumber, alreadyPaid: true };
   }
 
   const orders = getOrdersController();
+  const ctx: ReviewContext = { invoiceId: invoice.id, invoiceNumber: invoice.invoiceNumber, orderId };
+
+  if (!PAYABLE_STATUSES.includes(invoice.status)) {
+    // Never capture; but if PayPal already captured funds (e.g. the invoice was
+    // cancelled after the payer approved), hold it so the owner can refund.
+    const existing = await orders.getOrder({ id: orderId }).then(
+      (r) => r.result,
+      (err) => {
+        // Only a missing order is safe to ignore; transient errors must surface so PayPal retries.
+        if (err instanceof ApiError && err.statusCode === 404) return null;
+        throw err;
+      }
+    );
+    const captured = existing?.status === OrderStatus.Completed
+      ? existing.purchaseUnits?.[0]?.payments?.captures?.find((c) => c.status === CaptureStatus.Completed)
+      : undefined;
+    if (captured?.id) {
+      await holdPayment(checkCapture(invoice, { id: captured.id, amount: captured.amount }, { captureInvoiceId: null }), { ...ctx, captureId: captured.id }, reviews);
+    }
+    throw new PaymentError(`A ${invoice.status} invoice cannot be paid`, 409);
+  }
+
   let { result: order } = await orders.getOrder({ id: orderId });
 
-  // Verify before moving money: the order must still match the invoice.
+  // Verify before moving money: the order must still match the invoice, and
+  // the invoice's stored line items must still add up to its amount.
   if (order.id !== orderId || !orderMatchesInvoice(order, invoice)) {
-    throw new PaymentError("PayPal order does not match this invoice", 409);
+    await holdPayment([orderMismatchFlag(invoice, order.purchaseUnits?.[0]?.amount)], ctx, reviews);
   }
+  const totals = checkInvoiceTotals(invoice);
+  if (totals.length > 0) await holdPayment(totals, ctx, reviews);
 
   if (order.status === OrderStatus.Approved) {
     try {
@@ -289,7 +360,7 @@ export async function captureOrderForInvoice(orderId: string): Promise<CaptureOu
     throw new PaymentError(`PayPal order is ${order.status ?? "in an unknown state"}, not approved`, 409);
   }
   if (order.id !== orderId || !orderMatchesInvoice(order, invoice)) {
-    throw new PaymentError("PayPal order does not match this invoice", 409);
+    await holdPayment([orderMismatchFlag(invoice, order.purchaseUnits?.[0]?.amount)], ctx, reviews);
   }
 
   const captures = order.purchaseUnits?.[0]?.payments?.captures ?? [];
@@ -300,18 +371,35 @@ export async function captureOrderForInvoice(orderId: string): Promise<CaptureOu
     }
     throw new PaymentError("PayPal capture did not complete", 402);
   }
-  if (!capture.id || !amountsMatch(capture.amount, invoice)) {
-    throw new PaymentError("Captured amount does not match the invoice", 409);
-  }
+  if (!capture.id) throw new PaymentError("PayPal capture has no ID", 502);
+
+  // Final deterministic checks on the verified capture before anything is recorded.
+  const captureCtx = { ...ctx, captureId: capture.id };
+  const holder = await prisma.invoice.findUnique({ where: { paypalCaptureId: capture.id }, select: { id: true } });
+  const flags = checkCapture(invoice, { id: capture.id, amount: capture.amount }, { captureInvoiceId: holder?.id ?? null });
+  if (flags.length > 0) await holdPayment(flags, captureCtx, reviews);
 
   const record = verifiedPaymentRecord(
     { id: capture.id, createTime: capture.createTime },
     getPaypalClient().environment,
     new Date()
   );
-  await recordVerifiedPayment(invoice.id, orderId, record);
+  let recorded: "recorded" | "already_recorded";
+  try {
+    recorded = await recordVerifiedPayment(invoice.id, orderId, record);
+  } catch (err) {
+    // A concurrent write took this capture ID or changed the invoice: hold, never guess.
+    if (isCaptureIdConflict(err)) {
+      const other = await prisma.invoice.findUnique({ where: { paypalCaptureId: capture.id }, select: { id: true } });
+      await holdPayment(checkCapture(invoice, { id: capture.id, amount: capture.amount }, { captureInvoiceId: other?.id ?? -1 }), captureCtx, reviews);
+    }
+    if (err instanceof PaymentError && err.status === 409) {
+      await holdPayment([invoiceStateChangedFlag(invoice, capture.id)], captureCtx, reviews);
+    }
+    throw err;
+  }
 
-  return { status: "paid", invoiceNumber: invoice.invoiceNumber };
+  return { status: "paid", invoiceNumber: invoice.invoiceNumber, ...(recorded === "already_recorded" && { alreadyPaid: true }) };
 }
 
 // ── Verified payment record ───────────────────────────────────────────────────

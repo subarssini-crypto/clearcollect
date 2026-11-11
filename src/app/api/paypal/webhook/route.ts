@@ -7,49 +7,20 @@
  *    captureOrderForInvoice before the invoice is marked PAID.
  * 3. Processing is idempotent: duplicate deliveries of an already-paid
  *    order are acknowledged without changes.
+ * 4. Suspicious verified events (mismatches, duplicate captures, unknown
+ *    orders, refunds/reversals) are stored once as PaymentReview rows
+ *    (src/lib/paypal-webhook.ts) and acknowledged.
  *
- * Response codes: 401 for unverified requests, 200 for handled or
- * intentionally ignored events, 5xx for transient failures so PayPal retries.
+ * Response codes: 401 for unverified requests, 200 for handled, recorded, or
+ * intentionally ignored events, 5xx for transient failures (including a
+ * review that could not be stored) so PayPal retries.
  */
 
-import { ApiError } from "@paypal/paypal-server-sdk";
-import {
-  PaymentError,
-  captureOrderForInvoice,
-  describePaymentError,
-  verifyWebhookSignature,
-} from "@/lib/paypal";
+import { describePaymentError, verifyWebhookSignature } from "@/lib/paypal";
+import { handleVerifiedEvent, type WebhookEvent } from "@/lib/paypal-webhook";
 import { readBodyText } from "@/lib/request";
 
 const MAX_BODY_BYTES = 256 * 1024;
-const ORDER_ID_PATTERN = /^[A-Z0-9]{1,36}$/i;
-
-type WebhookEvent = {
-  id?: string;
-  event_type?: string;
-  resource?: {
-    id?: string;
-    status?: string;
-    supplementary_data?: { related_ids?: { order_id?: string } };
-  };
-};
-
-/** Event types that can lead to a PAID invoice, and where their order ID lives. */
-function orderIdFor(event: WebhookEvent): string | undefined {
-  switch (event.event_type) {
-    case "CHECKOUT.ORDER.APPROVED":
-      // Payer approved but may never have returned to the site — capture now.
-      return event.resource?.id;
-    case "PAYMENT.CAPTURE.COMPLETED":
-      return event.resource?.supplementary_data?.related_ids?.order_id;
-    default:
-      return undefined;
-  }
-}
-
-function ack(eventId: string | undefined, result: string): Response {
-  return Response.json({ ok: true, eventId, result });
-}
 
 export async function POST(request: Request): Promise<Response> {
   // Read incrementally so an oversized body is never fully buffered.
@@ -71,37 +42,10 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json({ ok: false, error: "Invalid signature" }, { status: 401 });
   }
 
-  const event = JSON.parse(rawBody) as WebhookEvent;
-  const tag = `[paypal webhook] ${event.event_type ?? "unknown"} ${event.id ?? ""}`.trim();
-
-  const orderId = orderIdFor(event);
-  if (orderId === undefined) {
-    // Verified but not a payment-completing event (PENDING, DENIED, REFUNDED, …).
-    if (event.event_type?.startsWith("PAYMENT.CAPTURE.")) {
-      console.info(`${tag}: capture ${event.resource?.id ?? "?"} is ${event.resource?.status ?? "?"}; no invoice change`);
-    }
-    return ack(event.id, "ignored");
-  }
-  if (!ORDER_ID_PATTERN.test(orderId)) {
-    console.warn(`${tag}: missing or malformed order ID`);
-    return ack(event.id, "ignored");
-  }
-
   try {
-    const outcome = await captureOrderForInvoice(orderId);
-    console.info(`${tag}: order ${orderId} → invoice ${outcome.invoiceNumber} ${outcome.status}`);
-    return ack(event.id, outcome.status);
+    return await handleVerifiedEvent(JSON.parse(rawBody) as WebhookEvent);
   } catch (err) {
-    // Business-rule failures won't change on retry: acknowledge and log.
-    const permanent =
-      (err instanceof PaymentError && err.status < 500) ||
-      (err instanceof ApiError && err.statusCode >= 400 && err.statusCode < 500);
-    if (permanent) {
-      console.warn(`${tag}: order ${orderId} not applied — ${describePaymentError(err).message}`);
-      return ack(event.id, "not_applied");
-    }
-    console.error(`${tag}: order ${orderId} processing failed`, err);
-    const { status } = describePaymentError(err);
-    return Response.json({ ok: false, error: "Processing failed" }, { status: Math.max(status, 500) });
+    console.error("[paypal webhook] processing failed", err);
+    return Response.json({ ok: false, error: "Processing failed" }, { status: 500 });
   }
 }

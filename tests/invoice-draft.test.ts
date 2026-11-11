@@ -4,10 +4,11 @@
  * Covers strict draft validation, server-side totals, clarification instead
  * of invented numbers, client resolution against database records,
  * transparent date defaults, and the draft endpoint's guards. Route tests
- * read existing clients but never write.
+ * use a test-owned client (tests/fixtures.ts), removed afterwards; the draft
+ * endpoint itself never writes.
  */
 
-import { after, describe, test, type TestContext } from "node:test";
+import { after, before, describe, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import {
   DRAFT_JSON_SCHEMA,
@@ -26,8 +27,14 @@ import { AiDraftError, gemini, generateInvoiceDraft } from "@/lib/ai-invoice";
 import { prisma } from "@/lib/prisma";
 import { POST } from "@/app/api/ai/invoice-draft/route";
 import { ownerCookie } from "./auth-helpers";
+import { testFixtures } from "./fixtures";
 
-after(() => prisma.$disconnect());
+const fixtures = testFixtures("AD");
+let clientFixture: { id: number };
+before(async () => {
+  clientFixture = await fixtures.client();
+});
+after(() => fixtures.cleanup());
 
 const CLIENTS = [
   { id: 1, name: "Sumchi", company: "Sumchi Studio" },
@@ -415,8 +422,7 @@ describe("POST /api/ai/invoice-draft", () => {
   });
 
   test("keeps the selected client and saves nothing to the database", async (t) => {
-    const client = await prisma.client.findFirst({ select: { id: true } });
-    if (!client) return t.skip("no client in the database");
+    const client = clientFixture;
     mockGemini(t, raw({ lineItems: [{ description: "Web design", quantity: 10, rate: 95 }] }));
     const before = await Promise.all([prisma.invoice.count(), prisma.client.count()]);
 
@@ -431,8 +437,7 @@ describe("POST /api/ai/invoice-draft", () => {
   });
 
   test("an unknown client name in the request is not assigned to the selected client", async (t) => {
-    const client = await prisma.client.findFirst({ select: { id: true } });
-    if (!client) return t.skip("no client in the database");
+    const client = clientFixture;
     mockGemini(t, raw({ clientMention: "Zz Nonexistent Client 7f3a" }));
     const res = await withGeminiKey(() => call({ request: "10 hours of web design at $95/hr and 8.5 hours of frontend development at $110.25/hr for Zz Nonexistent Client 7f3a", selectedClientId: client.id }));
     const draft = draftOf(((await res.json()) as { data: DraftOutcome }).data);

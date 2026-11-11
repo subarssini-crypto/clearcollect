@@ -59,11 +59,44 @@ model Invoice {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  client    Client             @relation(fields: [clientId], references: [id], onDelete: Restrict)
-  reminders FollowUpReminder[]
+  client         Client             @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  reminders      FollowUpReminder[]
+  paymentReviews PaymentReview[]
 
   @@index([clientId])
   @@index([status, dueDate])
+}
+
+// Payments held for owner review (src/lib/payment-risk.ts). Written when a
+// deterministic check fails on PayPal-verified data; the invoice stays unpaid.
+// dedupeKey makes webhook redeliveries and repeated returns create one row.
+// Marking a review REVIEWED never changes the invoice.
+model PaymentReview {
+  id                Int                 @id @default(autoincrement())
+  dedupeKey         String              @unique @db.VarChar(191)
+  status            PaymentReviewStatus @default(OPEN)
+  code              String              @db.VarChar(40)
+  reason            String              @db.VarChar(500)
+  recommendedAction String              @db.VarChar(500)
+  invoiceId         Int?
+  invoiceNumber     String?             @db.VarChar(191) // snapshot for display
+  paypalOrderId     String?             @db.VarChar(64)
+  paypalCaptureId   String?             @db.VarChar(64)
+  webhookEventId    String?             @db.VarChar(64)
+  expected          String?             @db.VarChar(64) // e.g. "USD 100.00"
+  observed          String?             @db.VarChar(64)
+  createdAt         DateTime            @default(now())
+  reviewedAt        DateTime?
+
+  invoice Invoice? @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@index([invoiceId])
+}
+
+enum PaymentReviewStatus {
+  OPEN
+  REVIEWED
 }
 
 enum PaymentEnvironment {

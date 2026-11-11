@@ -212,12 +212,13 @@ describe("signed-in owner can still perform permitted actions", () => {
 
   test("create a client (deleted afterwards)", async () => {
     const res = await createClient(jsonRequest("/api/clients", "POST", JSON.stringify({ name: "Auth Test Client (delete me)" }), cookie));
-    assert.equal(res.status, 201);
-    const { data } = (await res.json()) as { data: { id: number; name: string } };
+    const { data } = (await res.json()) as { data?: { id: number; name: string } };
     try {
-      assert.equal(data.name, "Auth Test Client (delete me)");
+      assert.equal(res.status, 201);
+      assert.equal(data?.name, "Auth Test Client (delete me)");
     } finally {
-      await prisma.client.delete({ where: { id: data.id } });
+      // Deleted even when an assertion above fails.
+      if (data?.id) await prisma.client.delete({ where: { id: data.id } });
     }
   });
 

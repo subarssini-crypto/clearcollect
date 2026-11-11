@@ -27,6 +27,7 @@ import { POST as forgotRoute } from "@/app/api/customer/auth/forgot-password/rou
 import { POST as resetRoute } from "@/app/api/customer/auth/reset-password/route";
 import { GET as meRoute } from "@/app/api/customer/me/route";
 import "./auth-helpers"; // throwaway AUTH_SECRET for this process
+import { cleanupTestRecords } from "./cleanup";
 
 const BASE = "http://localhost:3000";
 const STAMP = `${Date.now()}`;
@@ -64,11 +65,12 @@ const tokenFrom = (message: string) => new URL(/https?:\/\/\S+/.exec(message)![0
 
 beforeEach(() => customerThrottles.reset());
 
-after(async () => {
-  await prisma.customer.deleteMany({ where: { email: { startsWith: "pr-", endsWith: `-${STAMP}@example.invalid` } } });
-  customerThrottles.reset();
-  await prisma.$disconnect();
-});
+after(() =>
+  cleanupTestRecords(
+    () => prisma.customer.deleteMany({ where: { email: { startsWith: "pr-", endsWith: `-${STAMP}@example.invalid` } } }),
+    () => customerThrottles.reset(),
+  )
+);
 
 describe("customer password minimum length", () => {
   test("is 8 characters for signup: 8 is accepted (and can sign in), 7 is rejected", async () => {

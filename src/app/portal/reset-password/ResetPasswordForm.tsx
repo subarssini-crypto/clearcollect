@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useState, type FormEvent } from "react";
 import { MIN_PASSWORD } from "@/components/CustomerAuthForm";
+import PasswordToggle from "@/components/PasswordToggle";
 import { Notice, btnPrimary, inputClass, labelClass } from "@/components/ui";
 
 type ApiResult = { ok?: boolean; error?: string; message?: string; errors?: { field: string; message: string }[] };
@@ -13,6 +14,8 @@ export default function ResetPasswordForm() {
   const token = useSearchParams().get("token") ?? "";
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [done, setDone] = useState("");
@@ -70,14 +73,18 @@ export default function ResetPasswordForm() {
         <label htmlFor="reset-password" className={labelClass}>
           New password
         </label>
-        <input id="reset-password" type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} maxLength={1024} className={inputClass} />
+        <PasswordToggle visible={showPassword} onToggle={() => setShowPassword((v) => !v)} controls="reset-password">
+          <input id="reset-password" type={showPassword ? "text" : "password"} autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} maxLength={1024} className={`${inputClass} pr-10`} />
+        </PasswordToggle>
         <p className="mt-1 text-xs text-muted">At least {MIN_PASSWORD} characters.</p>
       </div>
       <div>
         <label htmlFor="reset-confirm" className={labelClass}>
           Confirm new password
         </label>
-        <input id="reset-confirm" type="password" autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} maxLength={1024} className={inputClass} />
+        <PasswordToggle visible={showConfirm} onToggle={() => setShowConfirm((v) => !v)} controls="reset-confirm">
+          <input id="reset-confirm" type={showConfirm ? "text" : "password"} autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} maxLength={1024} className={`${inputClass} pr-10`} />
+        </PasswordToggle>
       </div>
       {error && (
         <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-[13px] text-red-700">

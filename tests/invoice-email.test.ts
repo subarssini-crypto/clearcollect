@@ -3,10 +3,10 @@
  * No Zapier calls and no database writes: Zapier is a fake fetch, and the
  * workflow runs against an in-memory store that applies the same conditional
  * updates as the Prisma store. Route tests only hit paths rejected before any
- * write (they may read existing invoices from MySQL).
+ * write, using a test-owned SENT invoice (tests/fixtures.ts) removed afterwards.
  */
 
-import { describe, test } from "node:test";
+import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import {
   InvoiceEmailError,
@@ -21,9 +21,16 @@ import {
 } from "@/lib/invoice-email";
 import { validateCreateInvoice } from "@/lib/validation";
 import { lineItemCents, validateLineItems } from "@/lib/line-items";
-import { prisma } from "@/lib/prisma";
 import { GET as previewRoute, POST as sendRoute } from "@/app/api/invoices/[id]/send/route";
 import { ownerCookie } from "./auth-helpers";
+import { testFixtures } from "./fixtures";
+
+const fixtures = testFixtures("IE");
+let sentFixture: { id: number };
+before(async () => {
+  sentFixture = await fixtures.invoice((await fixtures.client()).id, "sent", { status: "SENT" });
+});
+after(() => fixtures.cleanup());
 
 const NOW = Date.parse("2026-10-23T12:00:00Z");
 const SECRET = "test-secret-0123456789abcdef";
@@ -502,9 +509,8 @@ describe("/api/invoices/[id]/send route (offline guards)", () => {
     assert.equal(preview.status, 404);
   });
 
-  test("refuses non-DRAFT invoices server-side without contacting Zapier", async (t) => {
-    const sent = await prisma.invoice.findFirst({ where: { status: { in: ["PAID", "SENT", "OVERDUE"] } }, select: { id: true } });
-    if (!sent) return t.skip("no PAID/SENT/OVERDUE invoice in the database");
+  test("refuses non-DRAFT invoices server-side without contacting Zapier", async () => {
+    const sent = sentFixture;
     const saved = { url: process.env.ZAPIER_INVOICE_WEBHOOK_URL, secret: process.env.ZAPIER_WEBHOOK_SECRET };
     // An unroutable host: if the status check were skipped, the test would fail instead of emailing anyone.
     process.env.ZAPIER_INVOICE_WEBHOOK_URL = "https://invalid.invalid/hook";

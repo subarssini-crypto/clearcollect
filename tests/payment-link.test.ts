@@ -13,7 +13,8 @@ import { NextRequest } from "next/server";
 import { Client, Environment, OrdersController } from "@paypal/paypal-server-sdk";
 import { prisma } from "@/lib/prisma";
 import { generatePaymentToken, getPublicInvoice, isWellFormedPaymentToken } from "@/lib/payment-link";
-import { PaymentError, captureOrderForInvoice } from "@/lib/paypal";
+import { PaymentHoldError, captureOrderForInvoice } from "@/lib/paypal";
+import type { PaymentReviewInput } from "@/lib/payment-risk";
 import { proxy } from "@/proxy";
 import { GET as getPublic } from "@/app/api/pay/[token]/route";
 import { POST as createPublicOrder } from "@/app/api/pay/[token]/order/route";
@@ -21,6 +22,7 @@ import { POST as createPaymentLink } from "@/app/api/invoices/[id]/payment-link/
 import { GET as paypalReturn } from "@/app/api/paypal/return/route";
 import { GET as paypalCancel } from "@/app/api/paypal/cancel/route";
 import { ownerCookie } from "./auth-helpers";
+import { cleanupTestRecords } from "./cleanup";
 
 const BASE = "http://localhost:3000";
 const STAMP = `${Date.now()}`;
@@ -78,12 +80,14 @@ before(async () => {
   clientB = await testClient("B");
 });
 
-after(async () => {
+after(() =>
   // Removes only what this file created.
-  await prisma.invoice.deleteMany({ where: { id: { in: created.invoiceIds }, invoiceNumber: { startsWith: `INV-TEST-PAY-${STAMP}-` } } });
-  await prisma.client.deleteMany({ where: { id: { in: created.clientIds }, name: { startsWith: "Pay Link Test" } } });
-  await prisma.$disconnect();
-});
+  cleanupTestRecords(
+    () => prisma.paymentReview.deleteMany({ where: { invoiceId: { in: created.invoiceIds } } }),
+    () => prisma.invoice.deleteMany({ where: { id: { in: created.invoiceIds }, invoiceNumber: { startsWith: `INV-TEST-PAY-${STAMP}-` } } }),
+    () => prisma.client.deleteMany({ where: { id: { in: created.clientIds }, name: { startsWith: "Pay Link Test" } } }),
+  )
+);
 
 describe("invalid tokens", () => {
   test("tokens are 256-bit and well-formed; malformed ones are rejected without a lookup", () => {
@@ -249,14 +253,68 @@ describe("amount tampering", { skip: !PAYPAL_CONFIGURED && "PayPal credentials n
     assert.equal(order.purchaseUnits?.[0]?.referenceId, String(invoice.id));
   });
 
-  test("an order no longer matching the stored amount is refused before capture", async () => {
+  test("an order no longer matching the stored amount is held for review before capture", async () => {
     const invoice = await testInvoice(clientA.id, "tamper-db");
     assert.equal((await startPayment(invoice.paymentToken)).status, 200);
     const { paypalOrderId } = await prisma.invoice.findUniqueOrThrow({ where: { id: invoice.id } });
     // Simulate the stored amount changing after the order was priced.
     await prisma.invoice.update({ where: { id: invoice.id }, data: { amount: "99.99" } });
-    await assert.rejects(captureOrderForInvoice(paypalOrderId!), (err) => err instanceof PaymentError && err.status === 409 && /does not match/.test(err.message));
+    const reviews: PaymentReviewInput[] = [];
+    const store = { save: async (rows: PaymentReviewInput[]) => void reviews.push(...rows) };
+    await assert.rejects(captureOrderForInvoice(paypalOrderId!, store), (err) => err instanceof PaymentHoldError && err.status === 409);
+    assert.deepEqual(reviews.map((r) => [r.code, r.invoiceId]), [["ORDER_MISMATCH", invoice.id]]);
     assert.equal((await prisma.invoice.findUniqueOrThrow({ where: { id: invoice.id } })).status, "SENT");
+  });
+
+  const paymentState = (id: number) =>
+    prisma.invoice.findUniqueOrThrow({
+      where: { id },
+      select: { status: true, amount: true, currency: true, lineItems: true, paypalOrderId: true, paypalCaptureId: true, paidAt: true, paypalEnvironment: true, updatedAt: true },
+    });
+  /** Captures with an in-memory review store; asserts a 409 hold and an unchanged invoice. */
+  async function expectHeld(orderId: string, invoiceId: number) {
+    const before = await paymentState(invoiceId);
+    const reviews: PaymentReviewInput[] = [];
+    await assert.rejects(captureOrderForInvoice(orderId, { save: async (rows) => void reviews.push(...rows) }), (err) => err instanceof PaymentHoldError && err.status === 409);
+    const after = await paymentState(invoiceId);
+    assert.deepEqual(after, before, "invoice unchanged");
+    assert.equal(after.status, "SENT");
+    assert.equal(after.paypalCaptureId, null);
+    return reviews;
+  }
+
+  test("invoice currency changed after the order was priced → held as ORDER_MISMATCH", async () => {
+    const invoice = await testInvoice(clientA.id, "tamper-cur");
+    assert.equal((await startPayment(invoice.paymentToken)).status, 200);
+    const { paypalOrderId } = await prisma.invoice.update({ where: { id: invoice.id }, data: { currency: "EUR" } });
+    const reviews = await expectHeld(paypalOrderId!, invoice.id);
+    assert.deepEqual(reviews.map((r) => [r.code, r.invoiceId, r.paypalOrderId]), [["ORDER_MISMATCH", invoice.id, paypalOrderId]]);
+    assert.match(reviews[0].reason, /order: USD 12\.34, invoice: EUR 12\.34/);
+    assert.deepEqual([reviews[0].expected, reviews[0].observed], ["EUR 12.34", "USD 12.34"]);
+  });
+
+  test("PayPal order created for a different invoice → held as ORDER_MISMATCH", async () => {
+    const victim = await testInvoice(clientA.id, "tamper-ord-a");
+    const other = await testInvoice(clientA.id, "tamper-ord-b");
+    assert.equal((await startPayment(other.paymentToken)).status, 200);
+    // Re-point the order (same amount and currency) at another invoice.
+    const { paypalOrderId } = await prisma.invoice.findUniqueOrThrow({ where: { id: other.id } });
+    await prisma.invoice.update({ where: { id: other.id }, data: { paypalOrderId: null } });
+    await prisma.invoice.update({ where: { id: victim.id }, data: { paypalOrderId } });
+    const reviews = await expectHeld(paypalOrderId!, victim.id);
+    assert.deepEqual(reviews.map((r) => [r.code, r.invoiceId]), [["ORDER_MISMATCH", victim.id]]);
+    assert.match(reviews[0].reason, new RegExp(`PayPal order for ${victim.invoiceNumber} does not match the invoice's reference`));
+    assert.equal((await paymentState(other.id)).status, "SENT");
+  });
+
+  test("stored line items no longer add up to the amount → held as LINE_ITEMS_TOTAL_MISMATCH before capture", async () => {
+    const invoice = await testInvoice(clientA.id, "tamper-lines");
+    assert.equal((await startPayment(invoice.paymentToken)).status, 200);
+    const { paypalOrderId } = await prisma.invoice.update({ where: { id: invoice.id }, data: { lineItems: [{ description: "Work", quantity: 1, rate: 10 }] } });
+    const reviews = await expectHeld(paypalOrderId!, invoice.id);
+    assert.deepEqual(reviews.map((r) => [r.code, r.invoiceId]), [["LINE_ITEMS_TOTAL_MISMATCH", invoice.id]]);
+    assert.match(reviews[0].reason, /line items add up to USD 10\.00, but its amount is USD 12\.34/);
+    assert.deepEqual([reviews[0].expected, reviews[0].observed], ["USD 10.00", "USD 12.34"]);
   });
 });
 

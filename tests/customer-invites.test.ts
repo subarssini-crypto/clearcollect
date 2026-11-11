@@ -26,6 +26,7 @@ import { GET as invoicesRoute } from "@/app/api/customer/invoices/route";
 import { GET as paymentsRoute } from "@/app/api/customer/payments/route";
 import { proxy } from "@/proxy";
 import { ownerCookie } from "./auth-helpers";
+import { cleanupTestRecords } from "./cleanup";
 
 const BASE = "http://localhost:3000";
 const STAMP = `${Date.now()}`;
@@ -90,11 +91,17 @@ async function testInvoice(clientId: number, suffix: string, data: Record<string
 /** Runs `fn` with env overrides, restoring the previous values afterwards. */
 async function withEnv<T>(vars: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
   const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
-  for (const [k, v] of Object.entries(vars)) (v === undefined ? delete process.env[k] : (process.env[k] = v));
+  for (const [k, v] of Object.entries(vars)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
   try {
     return await fn();
   } finally {
-    for (const [k, v] of Object.entries(saved)) (v === undefined ? delete process.env[k] : (process.env[k] = v));
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
   }
 }
 /** Route tests never reach Zapier: the invite hook is unset. */
@@ -118,14 +125,18 @@ before(async () => {
 beforeEach(() => customerThrottles.reset());
 
 after(async () => {
-  const customers = await prisma.customer.findMany({ where: { email: { startsWith: "ci-", endsWith: `-${STAMP}@example.invalid` } }, select: { id: true } });
-  const ids = customers.map((c) => c.id);
-  await prisma.customerInvite.deleteMany({ where: { OR: [{ clientId: { in: created.clientIds } }, { usedByCustomerId: { in: ids } }] } });
-  await prisma.customer.deleteMany({ where: { id: { in: ids } } });
-  await prisma.invoice.deleteMany({ where: { id: { in: created.invoiceIds }, invoiceNumber: { startsWith: `INV-TEST-CI-${STAMP}-` } } });
-  await prisma.client.deleteMany({ where: { id: { in: created.clientIds }, name: { startsWith: "Invite Test" } } });
-  customerThrottles.reset();
-  await prisma.$disconnect();
+  let ids: number[] = [];
+  await cleanupTestRecords(
+    async () => {
+      const customers = await prisma.customer.findMany({ where: { email: { startsWith: "ci-", endsWith: `-${STAMP}@example.invalid` } }, select: { id: true } });
+      ids = customers.map((c) => c.id);
+    },
+    () => prisma.customerInvite.deleteMany({ where: { OR: [{ clientId: { in: created.clientIds } }, { usedByCustomerId: { in: ids } }] } }),
+    () => prisma.customer.deleteMany({ where: { id: { in: ids } } }),
+    () => prisma.invoice.deleteMany({ where: { id: { in: created.invoiceIds }, invoiceNumber: { startsWith: `INV-TEST-CI-${STAMP}-` } } }),
+    () => prisma.client.deleteMany({ where: { id: { in: created.clientIds }, name: { startsWith: "Invite Test" } } }),
+    () => customerThrottles.reset(),
+  );
 });
 
 // ── Creation and authorization ────────────────────────────────────────────────

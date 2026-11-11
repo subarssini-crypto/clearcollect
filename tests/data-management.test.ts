@@ -42,6 +42,7 @@ import { GET as listDraftsRoute, POST as saveDraftRoute } from "@/app/api/follow
 import { DELETE as deleteDraftRoute } from "@/app/api/follow-ups/drafts/[id]/route";
 import { POST as sendReminderRoute } from "@/app/api/follow-ups/send/route";
 import { ownerCookie } from "./auth-helpers";
+import { cleanupTestRecords } from "./cleanup";
 
 // ── Unit: draft invoice deletion ──────────────────────────────────────────────
 
@@ -377,12 +378,14 @@ before(async () => {
   created.clientId = client.id;
 });
 
-after(async () => {
+after(() =>
   // Removes only what this file created.
-  await prisma.followUpReminder.deleteMany({ where: { invoiceId: { in: created.invoiceIds } } });
-  await prisma.invoice.deleteMany({ where: { id: { in: created.invoiceIds }, invoiceNumber: { startsWith: `INV-TEST-DM-${STAMP}-` } } });
-  await prisma.client.deleteMany({ where: { id: created.clientId, name: { startsWith: "Data Mgmt Test" } } });
-});
+  cleanupTestRecords(
+    () => prisma.followUpReminder.deleteMany({ where: { invoiceId: { in: created.invoiceIds } } }),
+    () => prisma.invoice.deleteMany({ where: { id: { in: created.invoiceIds }, invoiceNumber: { startsWith: `INV-TEST-DM-${STAMP}-` } } }),
+    () => prisma.client.deleteMany({ where: { id: created.clientId, name: { startsWith: "Data Mgmt Test" } } }),
+  )
+);
 
 describe("DELETE /api/invoices/[id] (integration)", () => {
   test("requires a session", async () => {

@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --env-file=.env --experimental-transform-types --no-warnings --import ./tests/register.mjs --test --test-concurrency=1 tests/*.test.ts",
+    "test": "node --env-file=.env.test --experimental-transform-types --no-warnings --import ./tests/register.mjs --test --test-concurrency=1 tests/*.test.ts",
+    "test:db:setup": "node --env-file=.env.test --experimental-transform-types --no-warnings --import ./tests/register.mjs scripts/test-db.mjs setup",
+    "test:db:reset": "node --env-file=.env.test --experimental-transform-types --no-warnings --import ./tests/register.mjs scripts/test-db.mjs reset",
     "test-data:reminder": "node --env-file=.env --experimental-transform-types --no-warnings --import ./tests/register.mjs scripts/create-reminder-test-data.ts",
     "auth:setup": "node --experimental-transform-types --no-warnings --import ./tests/register.mjs scripts/auth-setup.ts"
   },

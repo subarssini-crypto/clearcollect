@@ -45,6 +45,7 @@ const PAYMENT_NOTICES: Record<string, { tone: "success" | "info" | "warning" | "
   pending: { tone: "warning", text: "PayPal is still processing your payment. The invoice stays unpaid until it completes." },
   cancelled: { tone: "info", text: "Payment was cancelled. You have not been charged." },
   error: { tone: "error", text: "The payment could not be completed. You can try again." },
+  review: { tone: "warning", text: "Your payment is being reviewed by the sender. Please do not pay again; they will contact you." },
 };
 
 const LINK_NOTICES: Record<string, { tone: "success" | "error"; text: string }> = {

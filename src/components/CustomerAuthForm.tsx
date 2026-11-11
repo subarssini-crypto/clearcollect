@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useState, type FormEvent, type ReactNode } from "react";
+import PasswordToggle from "@/components/PasswordToggle";
 import { Notice, btnPrimary, inputClass, labelClass } from "@/components/ui";
 import { safePortalPath } from "@/lib/safe-redirect";
 
@@ -36,6 +37,9 @@ export default function CustomerAuthForm({ mode }: { mode: Mode }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
+  // Each password field has its own show/hide toggle.
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -138,7 +142,9 @@ export default function CustomerAuthForm({ mode }: { mode: Mode }) {
       {field(
         "password",
         "Password",
-        <input id="customer-password" type="password" autoComplete={mode === "signup" ? "new-password" : "current-password"} value={password} onChange={(e) => setPassword(e.target.value)} maxLength={1024} aria-invalid={!!fieldErrors.password || undefined} aria-describedby={describedBy("password")} className={inputClass} />,
+        <PasswordToggle visible={showPassword} onToggle={() => setShowPassword((v) => !v)} controls="customer-password">
+          <input id="customer-password" type={showPassword ? "text" : "password"} autoComplete={mode === "signup" ? "new-password" : "current-password"} value={password} onChange={(e) => setPassword(e.target.value)} maxLength={1024} aria-invalid={!!fieldErrors.password || undefined} aria-describedby={describedBy("password")} className={`${inputClass} pr-10`} />
+        </PasswordToggle>,
         mode === "signup" ? `At least ${MIN_PASSWORD} characters.` : undefined
       )}
       {mode === "login" && (
@@ -152,7 +158,9 @@ export default function CustomerAuthForm({ mode }: { mode: Mode }) {
         field(
           "confirm",
           "Confirm password",
-          <input id="customer-confirm" type="password" autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} maxLength={1024} aria-invalid={!!fieldErrors.confirm || undefined} aria-describedby={describedBy("confirm")} className={inputClass} />
+          <PasswordToggle visible={showConfirm} onToggle={() => setShowConfirm((v) => !v)} controls="customer-confirm">
+            <input id="customer-confirm" type={showConfirm ? "text" : "password"} autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} maxLength={1024} aria-invalid={!!fieldErrors.confirm || undefined} aria-describedby={describedBy("confirm")} className={`${inputClass} pr-10`} />
+          </PasswordToggle>
         )}
 
       {error && (

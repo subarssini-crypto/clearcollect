@@ -2,10 +2,11 @@
  * Transactions: verified payment metadata and listing.
  * No PayPal calls and no database writes — payment recording runs against an
  * in-memory store with the same conditional semantics as prismaPaymentStore;
- * the route test only reads.
+ * the route test only reads, against test-owned PAID and non-PAID invoices
+ * (tests/fixtures.ts) removed afterwards.
  */
 
-import { describe, test } from "node:test";
+import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { Environment } from "@paypal/paypal-server-sdk";
@@ -21,6 +22,24 @@ import { prisma } from "@/lib/prisma";
 import { GET as transactionsRoute } from "@/app/api/transactions/route";
 import { NextRequest } from "next/server";
 import { ownerCookie } from "./auth-helpers";
+import { testFixtures } from "./fixtures";
+
+const fixtures = testFixtures("TX");
+const fixtureIds = { paid: 0, unpaid: [] as number[] };
+before(async () => {
+  const { id: clientId } = await fixtures.client();
+  fixtureIds.paid = (await fixtures.invoice(clientId, "paid", {
+    status: "PAID",
+    paidAt: new Date("2026-10-21T00:00:00Z"),
+    paypalOrderId: `TESTTXORDER${fixtures.stamp}`,
+    paypalCaptureId: `TESTTXCAPTURE${fixtures.stamp}`,
+    paypalEnvironment: "SANDBOX",
+  })).id;
+  for (const status of ["DRAFT", "SENT", "CANCELLED"]) {
+    fixtureIds.unpaid.push((await fixtures.invoice(clientId, status.toLowerCase(), { status })).id);
+  }
+});
+after(() => fixtures.cleanup());
 
 const VERIFIED_AT = new Date("2026-10-24T10:00:00Z");
 
@@ -187,6 +206,8 @@ describe("GET /api/transactions", () => {
     const notPaid = await prisma.invoice.findMany({ where: { status: { not: "PAID" } }, select: { id: true } });
     for (const { id } of notPaid) assert.ok(!listed.has(id), `invoice ${id} is not PAID but was listed`);
     for (const t of json.data) assert.equal(t.method, t.captureId ? "PayPal" : null);
+    if (paid.length <= 100) assert.ok(listed.has(fixtureIds.paid), "the test-owned PAID invoice is listed");
+    for (const id of fixtureIds.unpaid) assert.ok(!listed.has(id), `test-owned unpaid invoice ${id} is not listed`);
   });
 
   test("clamps pagination", async () => {

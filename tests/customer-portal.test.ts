@@ -32,7 +32,12 @@ import { GET as paymentsRoute } from "@/app/api/customer/payments/route";
 import { GET as ownerInvoicesRoute } from "@/app/api/invoices/route";
 import { GET as publicPayRoute } from "@/app/api/pay/[token]/route";
 import { GET as paypalReturn } from "@/app/api/paypal/return/route";
+import { GET as reviewsRoute } from "@/app/api/payment-reviews/route";
+import { PATCH as markReviewRoute } from "@/app/api/payment-reviews/[id]/route";
+import { POST as reviewDemoRoute } from "@/app/api/payment-reviews/demo/route";
+import { SESSION_COOKIE } from "@/lib/auth";
 import { ownerCookie } from "./auth-helpers";
+import { cleanupTestRecords } from "./cleanup";
 
 const BASE = "http://localhost:3000";
 const STAMP = `${Date.now()}`;
@@ -128,13 +133,19 @@ beforeEach(() => customerThrottles.reset());
 
 after(async () => {
   // Removes only what this file created, children first.
-  const customers = await prisma.customer.findMany({ where: { email: { endsWith: `-${STAMP}@example.invalid`, startsWith: "cp-" } }, select: { id: true } });
-  await prisma.customerInvite.deleteMany({ where: { OR: [{ clientId: { in: created.clientIds } }, { usedByCustomerId: { in: customers.map((c) => c.id) } }] } });
-  await prisma.customer.deleteMany({ where: { id: { in: customers.map((c) => c.id) } } });
-  await prisma.invoice.deleteMany({ where: { id: { in: created.invoiceIds }, invoiceNumber: { startsWith: `INV-TEST-CP-${STAMP}-` } } });
-  await prisma.client.deleteMany({ where: { id: { in: created.clientIds }, name: { startsWith: "Portal Test" } } });
-  customerThrottles.reset();
-  await prisma.$disconnect();
+  let customerIds: number[] = [];
+  await cleanupTestRecords(
+    async () => {
+      const customers = await prisma.customer.findMany({ where: { email: { endsWith: `-${STAMP}@example.invalid`, startsWith: "cp-" } }, select: { id: true } });
+      customerIds = customers.map((c) => c.id);
+    },
+    () => prisma.customerInvite.deleteMany({ where: { OR: [{ clientId: { in: created.clientIds } }, { usedByCustomerId: { in: customerIds } }] } }),
+    () => prisma.customer.deleteMany({ where: { id: { in: customerIds } } }),
+    () => prisma.paymentReview.deleteMany({ where: { dedupeKey: { startsWith: `TEST-CP-${STAMP}-` } } }),
+    () => prisma.invoice.deleteMany({ where: { id: { in: created.invoiceIds }, invoiceNumber: { startsWith: `INV-TEST-CP-${STAMP}-` } } }),
+    () => prisma.client.deleteMany({ where: { id: { in: created.clientIds }, name: { startsWith: "Portal Test" } } }),
+    () => customerThrottles.reset(),
+  );
 });
 
 // ── Landing page ──────────────────────────────────────────────────────────────
@@ -314,6 +325,124 @@ describe("customer signup, login, logout", () => {
     assert.equal(safePortalPath("https://evil.example"), "/portal");
     assert.equal(safePortalPath("/invoices"), "/portal");
     assert.equal(safePortalPath("/portal?x=1"), "/portal?x=1");
+  });
+});
+
+// ── Payment reviews (owner only) ──────────────────────────────────────────────
+
+describe("payment reviews are owner-only", () => {
+  let review: { id: number };
+  let reviewInvoiceId = 0;
+
+  before(async () => {
+    const client = await testClient("reviews");
+    const invoice = await testInvoice(client.id, "review", { status: "SENT" });
+    reviewInvoiceId = invoice.id;
+    review = await prisma.paymentReview.create({
+      data: {
+        dedupeKey: `TEST-CP-${STAMP}-amount`,
+        code: "AMOUNT_MISMATCH",
+        reason: "TEST ONLY - held payment",
+        recommendedAction: "TEST ONLY",
+        invoiceId: invoice.id,
+        invoiceNumber: invoice.invoiceNumber,
+      },
+      select: { id: true },
+    });
+  });
+
+  const patch = (id: number | string, cookie?: string, headers: Record<string, string> = {}) =>
+    markReviewRoute(
+      new Request(`${BASE}/api/payment-reviews/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json", ...(cookie ? { cookie } : {}), ...headers },
+        body: JSON.stringify({ status: "REVIEWED" }),
+      }),
+      { params: Promise.resolve({ id: String(id) }) } as never
+    );
+  const demo = (cookie?: string, headers: Record<string, string> = {}) =>
+    reviewDemoRoute(new Request(`${BASE}/api/payment-reviews/demo`, { method: "POST", headers: { ...(cookie ? { cookie } : {}), ...headers } }));
+  const list = (cookie?: string) => reviewsRoute(get("/api/payment-reviews?status=all", cookie));
+  /** Every review and invoice payment field, to prove a request changed nothing. */
+  const snapshot = async () => ({
+    reviews: await prisma.paymentReview.findMany({ orderBy: { id: "asc" }, select: { id: true, status: true, reviewedAt: true } }),
+    invoices: await prisma.invoice.findMany({ orderBy: { id: "asc" }, select: { id: true, status: true, paypalCaptureId: true, paidAt: true, updatedAt: true } }),
+  });
+
+  /** Asserts every payment-review endpoint answers 401 for `cookie`, and nothing in the database changes. */
+  async function allRejected(cookie: string | undefined, label: string) {
+    const before = await snapshot();
+    const listRes = await list(cookie);
+    assert.equal(listRes.status, 401, `${label}: GET list`);
+    assert.equal(((await listRes.json()) as { data?: unknown }).data, undefined, `${label}: no review data leaked`);
+    assert.equal((await patch(review.id, cookie)).status, 401, `${label}: PATCH`);
+    assert.equal((await patch(review.id, cookie, { "sec-fetch-site": "same-origin" })).status, 401, `${label}: PATCH same-origin`);
+    const demoRes = await demo(cookie, { "sec-fetch-site": "same-origin" });
+    assert.equal(demoRes.status, 401, `${label}: demo`);
+    assert.equal(((await demoRes.json()) as { results?: unknown }).results, undefined, `${label}: demo did not run`);
+    assert.deepEqual(await snapshot(), before, `${label}: database unchanged`);
+  }
+
+  test("unauthenticated requests are rejected (401) and change nothing", async () => {
+    await allRejected(undefined, "anonymous");
+  });
+
+  test("a signed-in customer cannot list, mark reviewed, or run the demo", async () => {
+    await allRejected(cookieA, "customer");
+    // Customer session value replayed under the owner cookie name, and a garbage owner cookie.
+    const customerValue = cookieA.split("=").slice(1).join("=");
+    await allRejected(`${SESSION_COOKIE}=${customerValue}`, "customer cookie as owner cookie");
+    await allRejected(`${SESSION_COOKIE}=forged`, "forged owner cookie");
+  });
+
+  test("the proxy blocks the page and APIs for anonymous users and customers", async () => {
+    for (const cookie of [undefined, cookieA]) {
+      const page = await proxy(get("/payment-reviews", cookie));
+      assert.equal(page.status, 307);
+      assert.equal(new URL(page.headers.get("location")!).pathname, "/login");
+      for (const [path, method] of [["/api/payment-reviews", "GET"], [`/api/payment-reviews/${review.id}`, "PATCH"], ["/api/payment-reviews/demo", "POST"]]) {
+        const res = await proxy(new NextRequest(`${BASE}${path}`, { method, headers: cookie ? { cookie } : {} }));
+        assert.equal(res.status, 401, `${method} ${path} (${cookie ? "customer" : "anonymous"})`);
+      }
+    }
+    assert.equal((await proxy(get("/payment-reviews", owner))).headers.get("x-middleware-next"), "1", "owner reaches the page");
+  });
+
+  test("cross-site requests with the owner cookie are refused (403) and change nothing", async () => {
+    const before = await snapshot();
+    assert.equal((await patch(review.id, owner, { "sec-fetch-site": "cross-site" })).status, 403);
+    assert.equal((await demo(owner, { "sec-fetch-site": "cross-site" })).status, 403);
+    assert.deepEqual(await snapshot(), before);
+  });
+
+  test("the owner can list reviews and mark one reviewed; the invoice is never changed", async () => {
+    const listRes = await list(owner);
+    assert.equal(listRes.status, 200);
+    const { data } = (await listRes.json()) as { data: { id: number; status: string }[] };
+    assert.equal(data.find((r) => r.id === review.id)?.status, "OPEN");
+
+    const invoiceBefore = await prisma.invoice.findUniqueOrThrow({ where: { id: reviewInvoiceId } });
+    const othersBefore = (await snapshot()).reviews.filter((r) => r.id !== review.id);
+    assert.equal((await patch(review.id, owner, { "sec-fetch-site": "same-origin" })).status, 200);
+    const marked = await prisma.paymentReview.findUniqueOrThrow({ where: { id: review.id } });
+    assert.equal(marked.status, "REVIEWED");
+    assert.ok(marked.reviewedAt);
+    // Repeating is harmless and keeps the first reviewedAt.
+    assert.equal((await patch(review.id, owner)).status, 200);
+    assert.deepEqual((await prisma.paymentReview.findUniqueOrThrow({ where: { id: review.id } })).reviewedAt, marked.reviewedAt);
+    assert.deepEqual(await prisma.invoice.findUniqueOrThrow({ where: { id: reviewInvoiceId } }), invoiceBefore, "invoice untouched");
+    assert.deepEqual((await snapshot()).reviews.filter((r) => r.id !== review.id), othersBefore, "no other review changed");
+
+    assert.equal((await patch(2_000_000_000, owner)).status, 404);
+    assert.equal((await patch("1;DROP", owner)).status, 400);
+  });
+
+  test("the owner can run the demo; it writes nothing", async () => {
+    const before = await snapshot();
+    const res = await demo(owner, { "sec-fetch-site": "same-origin" });
+    assert.equal(res.status, 200);
+    assert.equal(((await res.json()) as { demo: boolean }).demo, true);
+    assert.deepEqual(await snapshot(), before);
   });
 });
 

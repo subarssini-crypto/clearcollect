@@ -1,11 +1,12 @@
 /**
  * Offline tests for AI follow-up reminders and Zapier delivery.
  * No Gemini or Zapier calls: Zapier is exercised with a fake fetch, and the
- * route tests only hit paths that are rejected before any external call
- * (they read existing PAID invoices from MySQL but never write).
+ * route tests only hit paths that are rejected before any external call.
+ * The route tests use a test-owned PAID invoice (see tests/fixtures.ts),
+ * removed afterwards; the routes themselves never write.
  */
 
-import { describe, test } from "node:test";
+import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import {
   FollowUpError,
@@ -22,10 +23,23 @@ import {
   validateSendReminder,
   type ReminderInvoice,
 } from "@/lib/follow-up";
-import { prisma } from "@/lib/prisma";
 import { POST as sendRoute } from "@/app/api/follow-ups/send/route";
 import { POST as draftRoute } from "@/app/api/follow-ups/draft/route";
 import { ownerCookie } from "./auth-helpers";
+import { testFixtures } from "./fixtures";
+
+const fixtures = testFixtures("FU");
+let paidFixture: { id: number };
+before(async () => {
+  const client = await fixtures.client();
+  paidFixture = await fixtures.invoice(client.id, "paid", {
+    status: "PAID",
+    paidAt: new Date("2026-10-21T00:00:00Z"),
+    paypalOrderId: `TESTFUORDER${fixtures.stamp}`,
+    paypalCaptureId: `TESTFUCAPTURE${fixtures.stamp}`,
+  });
+});
+after(() => fixtures.cleanup());
 
 const NOW = Date.parse("2026-10-19T12:00:00Z");
 const SECRET = "test-secret-0123456789abcdef";
@@ -345,9 +359,8 @@ describe("follow-up routes (offline guards)", () => {
     assert.equal((await post(draftRoute, JSON.stringify({ invoiceId: "1" }))).status, 422);
   });
 
-  test("send and draft refuse PAID invoices server-side (no Zapier or Gemini call)", async (t) => {
-    const paid = await prisma.invoice.findFirst({ where: { status: "PAID" }, select: { id: true } });
-    if (!paid) return t.skip("no PAID invoice in the database");
+  test("send and draft refuse PAID invoices server-side (no Zapier or Gemini call)", async () => {
+    const paid = paidFixture;
     const saved = { url: process.env.ZAPIER_WEBHOOK_URL, secret: process.env.ZAPIER_WEBHOOK_SECRET };
     process.env.ZAPIER_WEBHOOK_URL = ZAPIER_ENV.ZAPIER_WEBHOOK_URL;
     process.env.ZAPIER_WEBHOOK_SECRET = SECRET;

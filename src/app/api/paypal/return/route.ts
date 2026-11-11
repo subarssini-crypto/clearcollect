@@ -7,7 +7,7 @@
  */
 
 import { type NextRequest } from "next/server";
-import { captureOrderForInvoice, describePaymentError } from "@/lib/paypal";
+import { PaymentHoldError, captureOrderForInvoice, describePaymentError } from "@/lib/paypal";
 import { payPageRedirect } from "@/lib/payment-link";
 
 const ORDER_ID_PATTERN = /^[A-Z0-9]{1,36}$/i;
@@ -23,6 +23,8 @@ export async function GET(request: NextRequest): Promise<Response> {
   try {
     result = (await captureOrderForInvoice(orderId)).status;
   } catch (err) {
+    // Held for owner review: tell the payer not to pay again.
+    if (err instanceof PaymentHoldError) return payPageRedirect(request, orderId, "review");
     const { status } = describePaymentError(err);
     if (status >= 409) console.error(`[GET /api/paypal/return] order ${orderId}`, err);
   }
